@@ -32,3 +32,20 @@ cbindgen = "0.27"
 
 [features]
 default = []
+
+# Examples
+[[example]]
+name = "simple_window"
+path = "examples/simple_window.rs"
+
+[[example]]
+name = "keyboard_demo"
+path = "examples/keyboard_demo.rs"
+
+[[example]]
+name = "audio_player"
+path = "examples/audio_player.rs"
+
+[[example]]
+name = "window_control"
+path = "examples/window_control.rs"

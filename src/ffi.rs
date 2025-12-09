@@ -63,8 +63,11 @@ static GUI_STATE: Mutex<Option<GuiState>> = Mutex::new(None);
 
 // Audio players stored separately (not Send/Sync safe)
 use std::cell::RefCell;
+use crate::renderer::Renderer;
+
 thread_local! {
     static AUDIO_PLAYERS: RefCell<HashMap<u64, AudioPlayer>> = RefCell::new(HashMap::new());
+    static RENDERERS: RefCell<HashMap<u64, Renderer>> = RefCell::new(HashMap::new());
 }
 
 fn get_gui_state() -> std::sync::MutexGuard<'static, Option<GuiState>> {
@@ -688,6 +691,302 @@ pub extern "C" fn qi_gui_audio_free_impl(audio_id: u64) {
 }
 
 // ============================================================================
+// Renderer FFI Functions
+// ============================================================================
+
+/// Create a renderer for a window
+/// Returns renderer ID (> 0) on success, 0 on failure
+#[no_mangle]
+pub extern "C" fn qi_gui_renderer_create_impl(window_id: u64) -> u64 {
+    if window_id == 0 {
+        return 0;
+    }
+
+    let mut state = get_gui_state();
+    let Some(state) = state.as_mut() else {
+        return 0;
+    };
+
+    // Get the window
+    let Some(window) = state.created_windows.get(&window_id) else {
+        eprintln!("Error: Window ID {} not found", window_id);
+        return 0;
+    };
+
+    // Create renderer from the window's Arc<Mutex<TaoWindow>>
+    let tao_window = window.inner();
+    match Renderer::new_from_arc_mutex(tao_window) {
+        Ok(renderer) => {
+            // Generate renderer ID
+            let renderer_id = window_id * 1000 + 1; // Simple ID generation
+
+            // Store renderer in thread-local storage
+            RENDERERS.with(|renderers| {
+                renderers.borrow_mut().insert(renderer_id, renderer);
+            });
+
+            renderer_id
+        }
+        Err(e) => {
+            eprintln!("Failed to create renderer: {}", e);
+            0
+        }
+    }
+}
+
+/// Clear the rendering surface with a color (RGB)
+#[no_mangle]
+pub extern "C" fn qi_gui_renderer_clear_impl(renderer_id: u64, r: u8, g: u8, b: u8) {
+    if renderer_id == 0 {
+        return;
+    }
+
+    RENDERERS.with(|renderers| {
+        if let Some(renderer) = renderers.borrow_mut().get_mut(&renderer_id) {
+            renderer.clear(r, g, b);
+        }
+    });
+}
+
+/// Draw a filled rectangle
+#[no_mangle]
+pub extern "C" fn qi_gui_renderer_draw_rect_impl(
+    renderer_id: u64,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    r: u8,
+    g: u8,
+    b: u8,
+) {
+    if renderer_id == 0 {
+        return;
+    }
+
+    RENDERERS.with(|renderers| {
+        if let Some(renderer) = renderers.borrow_mut().get_mut(&renderer_id) {
+            renderer.draw_rect(x, y, width, height, r, g, b);
+        }
+    });
+}
+
+/// Draw a single pixel
+#[no_mangle]
+pub extern "C" fn qi_gui_renderer_draw_pixel_impl(
+    renderer_id: u64,
+    x: u32,
+    y: u32,
+    r: u8,
+    g: u8,
+    b: u8,
+) {
+    if renderer_id == 0 {
+        return;
+    }
+
+    RENDERERS.with(|renderers| {
+        if let Some(renderer) = renderers.borrow_mut().get_mut(&renderer_id) {
+            renderer.draw_pixel(x, y, r, g, b);
+        }
+    });
+}
+
+/// Draw a line using Bresenham algorithm
+#[no_mangle]
+pub extern "C" fn qi_gui_renderer_draw_line_impl(
+    renderer_id: u64,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    r: u8,
+    g: u8,
+    b: u8,
+) {
+    if renderer_id == 0 {
+        return;
+    }
+
+    RENDERERS.with(|renderers| {
+        if let Some(renderer) = renderers.borrow_mut().get_mut(&renderer_id) {
+            renderer.draw_line(x0, y0, x1, y1, r, g, b);
+        }
+    });
+}
+
+/// Draw a circle using midpoint circle algorithm
+#[no_mangle]
+pub extern "C" fn qi_gui_renderer_draw_circle_impl(
+    renderer_id: u64,
+    cx: i32,
+    cy: i32,
+    radius: u32,
+    r: u8,
+    g: u8,
+    b: u8,
+) {
+    if renderer_id == 0 {
+        return;
+    }
+
+    RENDERERS.with(|renderers| {
+        if let Some(renderer) = renderers.borrow_mut().get_mut(&renderer_id) {
+            renderer.draw_circle(cx, cy, radius, r, g, b);
+        }
+    });
+}
+
+/// Draw an image from file
+/// Returns 0 on success, non-zero on error
+#[no_mangle]
+pub extern "C" fn qi_gui_renderer_draw_image_impl(
+    renderer_id: u64,
+    file_path: *const c_char,
+    x: u32,
+    y: u32,
+) -> i32 {
+    if renderer_id == 0 || file_path.is_null() {
+        return -1;
+    }
+
+    let c_str = unsafe { CStr::from_ptr(file_path) };
+    let path_str = match c_str.to_str() {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    RENDERERS.with(|renderers| {
+        if let Some(renderer) = renderers.borrow_mut().get_mut(&renderer_id) {
+            match renderer.draw_image(path_str, x, y) {
+                Ok(_) => 0,
+                Err(e) => {
+                    eprintln!("Failed to draw image: {}", e);
+                    -1
+                }
+            }
+        } else {
+            -1
+        }
+    })
+}
+
+/// Resize the renderer surface
+#[no_mangle]
+pub extern "C" fn qi_gui_renderer_resize_impl(renderer_id: u64, width: u32, height: u32) {
+    if renderer_id == 0 {
+        return;
+    }
+
+    RENDERERS.with(|renderers| {
+        if let Some(renderer) = renderers.borrow_mut().get_mut(&renderer_id) {
+            renderer.resize(width, height);
+        }
+    });
+}
+
+/// Get renderer width
+#[no_mangle]
+pub extern "C" fn qi_gui_renderer_get_width_impl(renderer_id: u64) -> u32 {
+    if renderer_id == 0 {
+        return 0;
+    }
+
+    RENDERERS.with(|renderers| {
+        if let Some(renderer) = renderers.borrow().get(&renderer_id) {
+            renderer.size().0
+        } else {
+            0
+        }
+    })
+}
+
+/// Get renderer height
+#[no_mangle]
+pub extern "C" fn qi_gui_renderer_get_height_impl(renderer_id: u64) -> u32 {
+    if renderer_id == 0 {
+        return 0;
+    }
+
+    RENDERERS.with(|renderers| {
+        if let Some(renderer) = renderers.borrow().get(&renderer_id) {
+            renderer.size().1
+        } else {
+            0
+        }
+    })
+}
+
+/// Free/release a renderer
+#[no_mangle]
+pub extern "C" fn qi_gui_renderer_free_impl(renderer_id: u64) {
+    if renderer_id == 0 {
+        return;
+    }
+
+    RENDERERS.with(|renderers| {
+        renderers.borrow_mut().remove(&renderer_id);
+    });
+}
+
+/// Draw text at a position with a color
+#[no_mangle]
+pub extern "C" fn qi_gui_renderer_draw_text_impl(
+    renderer_id: u64,
+    text: *const c_char,
+    x: i32,
+    y: i32,
+    r: u8,
+    g: u8,
+    b: u8,
+) {
+    if renderer_id == 0 || text.is_null() {
+        return;
+    }
+
+    let c_str = unsafe { CStr::from_ptr(text) };
+    let text_str = match c_str.to_str() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    RENDERERS.with(|renderers| {
+        if let Some(renderer) = renderers.borrow_mut().get_mut(&renderer_id) {
+            renderer.draw_text(text_str, x, y, r, g, b);
+        }
+    });
+}
+
+/// Draw text with custom scale
+#[no_mangle]
+pub extern "C" fn qi_gui_renderer_draw_text_scaled_impl(
+    renderer_id: u64,
+    text: *const c_char,
+    x: i32,
+    y: i32,
+    scale: u32,
+    r: u8,
+    g: u8,
+    b: u8,
+) {
+    if renderer_id == 0 || text.is_null() {
+        return;
+    }
+
+    let c_str = unsafe { CStr::from_ptr(text) };
+    let text_str = match c_str.to_str() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    RENDERERS.with(|renderers| {
+        if let Some(renderer) = renderers.borrow_mut().get_mut(&renderer_id) {
+            renderer.draw_text_scaled(text_str, x, y, scale, r, g, b);
+        }
+    });
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -698,32 +997,32 @@ mod tests {
     #[test]
     fn test_version() {
         unsafe {
-            let version = qi_gui_version();
+            let version = qi_gui_version_impl();
             assert!(!version.is_null());
             let version_str = CStr::from_ptr(version).to_str().unwrap();
             assert!(version_str.contains("qi-gui"));
-            qi_gui_free_string(version);
+            qi_gui_free_string_impl(version);
         }
     }
 
     #[test]
     fn test_create_window() {
         let title = CString::new("Test Window").unwrap();
-        let window_id = qi_gui_create_window(title.as_ptr(), 800, 600);
+        let window_id = qi_gui_create_window_impl(title.as_ptr(), 800, 600);
         assert!(window_id > 0);
     }
 
     #[test]
     fn test_window_title() {
         let title = CString::new("Test Window").unwrap();
-        let window_id = qi_gui_create_window(title.as_ptr(), 800, 600);
+        let window_id = qi_gui_create_window_impl(title.as_ptr(), 800, 600);
 
         unsafe {
-            let retrieved_title = qi_gui_get_title(window_id);
+            let retrieved_title = qi_gui_get_title_impl(window_id);
             assert!(!retrieved_title.is_null());
             let title_str = CStr::from_ptr(retrieved_title).to_str().unwrap();
             assert_eq!(title_str, "Test Window");
-            qi_gui_free_string(retrieved_title);
+            qi_gui_free_string_impl(retrieved_title);
         }
     }
 }

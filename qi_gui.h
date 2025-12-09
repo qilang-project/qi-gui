@@ -159,4 +159,112 @@ int32_t qi_gui_audio_is_finished_impl(uint64_t audio_id);
  */
 void qi_gui_audio_free_impl(uint64_t audio_id);
 
+/**
+ * Create a renderer for a window
+ * Returns renderer ID (> 0) on success, 0 on failure
+ */
+uint64_t qi_gui_renderer_create_impl(uint64_t window_id);
+
+/**
+ * Clear the rendering surface with a color (RGB)
+ */
+void qi_gui_renderer_clear_impl(uint64_t renderer_id, uint8_t r, uint8_t g, uint8_t b);
+
+/**
+ * Draw a filled rectangle
+ */
+void qi_gui_renderer_draw_rect_impl(uint64_t renderer_id,
+                                    uint32_t x,
+                                    uint32_t y,
+                                    uint32_t width,
+                                    uint32_t height,
+                                    uint8_t r,
+                                    uint8_t g,
+                                    uint8_t b);
+
+/**
+ * Draw a single pixel
+ */
+void qi_gui_renderer_draw_pixel_impl(uint64_t renderer_id,
+                                     uint32_t x,
+                                     uint32_t y,
+                                     uint8_t r,
+                                     uint8_t g,
+                                     uint8_t b);
+
+/**
+ * Draw a line using Bresenham algorithm
+ */
+void qi_gui_renderer_draw_line_impl(uint64_t renderer_id,
+                                    int32_t x0,
+                                    int32_t y0,
+                                    int32_t x1,
+                                    int32_t y1,
+                                    uint8_t r,
+                                    uint8_t g,
+                                    uint8_t b);
+
+/**
+ * Draw a circle using midpoint circle algorithm
+ */
+void qi_gui_renderer_draw_circle_impl(uint64_t renderer_id,
+                                      int32_t cx,
+                                      int32_t cy,
+                                      uint32_t radius,
+                                      uint8_t r,
+                                      uint8_t g,
+                                      uint8_t b);
+
+/**
+ * Draw an image from file
+ * Returns 0 on success, non-zero on error
+ */
+int32_t qi_gui_renderer_draw_image_impl(uint64_t renderer_id,
+                                        const char *file_path,
+                                        uint32_t x,
+                                        uint32_t y);
+
+/**
+ * Resize the renderer surface
+ */
+void qi_gui_renderer_resize_impl(uint64_t renderer_id, uint32_t width, uint32_t height);
+
+/**
+ * Get renderer width
+ */
+uint32_t qi_gui_renderer_get_width_impl(uint64_t renderer_id);
+
+/**
+ * Get renderer height
+ */
+uint32_t qi_gui_renderer_get_height_impl(uint64_t renderer_id);
+
+/**
+ * Free/release a renderer
+ */
+void qi_gui_renderer_free_impl(uint64_t renderer_id);
+
+/**
+ * Draw text at a position with a color
+ */
+void qi_gui_renderer_draw_text_impl(uint64_t renderer_id,
+                                    const char *text,
+                                    int32_t x,
+                                    int32_t y,
+                                    uint8_t r,
+                                    uint8_t g,
+                                    uint8_t b);
+
+/**
+ * Draw text with custom scale
+ */
+void qi_gui_renderer_draw_text_scaled_impl(uint64_t renderer_id,
+                                           const char *text,
+                                           int32_t x,
+                                           int32_t y,
+                                           uint32_t scale,
+                                           uint8_t r,
+                                           uint8_t g,
+                                           uint8_t b);
+
 #endif  /* QI_GUI_H */
