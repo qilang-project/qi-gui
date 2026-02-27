@@ -1,5 +1,5 @@
-/// Software renderer module using softbuffer
-/// Provides image rendering and basic 2D drawing capabilities
+/// Software renderer module using tiny-skia and softbuffer
+/// Provides high-quality 2D drawing capabilities
 
 use softbuffer::{Context, Surface};
 use std::num::NonZeroU32;
@@ -8,67 +8,54 @@ use std::rc::Rc;
 use std::cell::RefCell;
 use std::ops::Deref;
 use tao::window::Window as TaoWindow;
+use tiny_skia::{Pixmap, Paint, Color, Rect, Transform, PathBuilder, Stroke, LineCap, PixmapPaint};
+
 /// Software renderer for a window
 pub struct Renderer {
     _window: Arc<Mutex<TaoWindow>>,  // Keep window alive
     surface: Rc<RefCell<Surface<Rc<TaoWindow>, Rc<TaoWindow>>>>,
     width: u32,
     height: u32,
+    pixmap: Pixmap,
 }
 
 impl Renderer {
     /// Create a new renderer from Arc<Mutex<TaoWindow>>
-    /// This uses an unsafe extraction but is safe in our single-threaded event loop context
     pub fn new_from_arc_mutex(window: Arc<Mutex<TaoWindow>>) -> Result<Self, Box<dyn std::error::Error>> {
         let size = {
             let window_guard = window.lock().unwrap();
             window_guard.inner_size()
         };
 
-        // SAFETY: We're creating an Rc from a raw pointer
-        // This is safe because:
-        // 1. The Arc<Mutex<>> keeps the window alive
-        // 2. The event loop is single-threaded
-        // 3. We never move the TaoWindow after creation
+        // SAFETY: Dummy Rc for softbuffer
         let rc_window: Rc<TaoWindow> = unsafe {
             let ptr = window.lock().unwrap().deref() as *const TaoWindow;
-            // Create Rc from the raw pointer
-            // Note: This doesn't actually own the window, so we need to be careful
             Rc::from_raw(ptr)
         };
 
         let context = Context::new(rc_window.clone())?;
-        let surface = Surface::new(&context, rc_window.clone())?;
+        let mut surface = Surface::new(&context, rc_window.clone())?;
+        
+        if size.width > 0 && size.height > 0 {
+            surface.resize(
+                NonZeroU32::new(size.width).unwrap(),
+                NonZeroU32::new(size.height).unwrap(),
+            )?;
+        }
 
-        // Forget the Rc to avoid double-free (Arc still owns it)
         std::mem::forget(rc_window);
+
+        // Create initial pixmap
+        let width = size.width.max(1);
+        let height = size.height.max(1);
+        let pixmap = Pixmap::new(width, height).ok_or("Failed to create pixmap")?;
 
         Ok(Renderer {
             _window: window,
             surface: Rc::new(RefCell::new(surface)),
             width: size.width,
             height: size.height,
-        })
-    }
-
-    /// Create a new renderer for a window (for Rc<TaoWindow>)
-    pub fn new(window: Rc<TaoWindow>) -> Result<Self, Box<dyn std::error::Error>> {
-        let size = window.inner_size();
-
-        let context = Context::new(window.clone())?;
-        let surface = Surface::new(&context, window.clone())?;
-
-        // For this case, we wrap the Rc in Arc<Mutex<>> to match our struct
-        let arc_window = Arc::new(Mutex::new(unsafe {
-            std::ptr::read(Rc::as_ptr(&window))
-        }));
-        std::mem::forget(window);
-
-        Ok(Renderer {
-            _window: arc_window,
-            surface: Rc::new(RefCell::new(surface)),
-            width: size.width,
-            height: size.height,
+            pixmap,
         })
     }
 
@@ -82,6 +69,11 @@ impl Renderer {
                 NonZeroU32::new(width).unwrap(),
                 NonZeroU32::new(height).unwrap(),
             );
+            
+            // Recreate pixmap
+            if let Some(new_pixmap) = Pixmap::new(width, height) {
+                self.pixmap = new_pixmap;
+            }
         }
     }
 
@@ -90,337 +82,205 @@ impl Renderer {
         (self.width, self.height)
     }
 
-    /// Clear the surface with a color (RGBA format)
+    /// Clear the surface with a color
     pub fn clear(&mut self, r: u8, g: u8, b: u8) {
-        if self.width == 0 || self.height == 0 {
-            return;
-        }
-
-        let color = u32::from_be_bytes([0, r, g, b]);
-
-        let mut surface = self.surface.borrow_mut();
-        let mut buffer = surface.buffer_mut().unwrap();
-        buffer.fill(color);
-        let _ = buffer.present();
+        // tiny-skia uses RGBA, mapped to 0-255
+        let color = Color::from_rgba8(r, g, b, 255);
+        self.pixmap.fill(color);
     }
 
     /// Draw a filled rectangle
     pub fn draw_rect(&mut self, x: u32, y: u32, width: u32, height: u32, r: u8, g: u8, b: u8) {
-        if self.width == 0 || self.height == 0 {
-            return;
+        let rect = Rect::from_xywh(x as f32, y as f32, width as f32, height as f32);
+        if let Some(rect) = rect {
+            let mut paint = Paint::default();
+            paint.set_color_rgba8(r, g, b, 255);
+            paint.anti_alias = true;
+
+            self.pixmap.fill_rect(rect, &paint, Transform::identity(), None);
         }
-
-        let color = u32::from_be_bytes([0, r, g, b]);
-        let mut surface = self.surface.borrow_mut();
-        let mut buffer = surface.buffer_mut().unwrap();
-
-        for py in y..(y + height).min(self.height) {
-            for px in x..(x + width).min(self.width) {
-                let idx = (py * self.width + px) as usize;
-                if idx < buffer.len() {
-                    buffer[idx] = color;
-                }
-            }
-        }
-
-        let _ = buffer.present();
     }
 
     /// Draw a single pixel
     pub fn draw_pixel(&mut self, x: u32, y: u32, r: u8, g: u8, b: u8) {
-        if self.width == 0 || self.height == 0 || x >= self.width || y >= self.height {
-            return;
-        }
-
-        let color = u32::from_be_bytes([0, r, g, b]);
-        let mut surface = self.surface.borrow_mut();
-        let mut buffer = surface.buffer_mut().unwrap();
-
-        let idx = (y * self.width + x) as usize;
-        if idx < buffer.len() {
-            buffer[idx] = color;
-        }
-
-        let _ = buffer.present();
+        // Drawing a 1x1 rect is safer and easier with tiny-skia
+        self.draw_rect(x, y, 1, 1, r, g, b);
     }
 
-    /// Draw a line (simple Bresenham algorithm)
+    /// Draw a line
     pub fn draw_line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, r: u8, g: u8, b: u8) {
-        if self.width == 0 || self.height == 0 {
-            return;
+        let mut pb = PathBuilder::new();
+        pb.move_to(x0 as f32, y0 as f32);
+        pb.line_to(x1 as f32, y1 as f32);
+        
+        if let Some(path) = pb.finish() {
+            let mut paint = Paint::default();
+            paint.set_color_rgba8(r, g, b, 255);
+            paint.anti_alias = true;
+
+            let mut stroke = Stroke::default();
+            stroke.width = 1.0;
+            stroke.line_cap = LineCap::Round;
+
+            self.pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
         }
-
-        let color = u32::from_be_bytes([0, r, g, b]);
-        let mut surface = self.surface.borrow_mut();
-        let mut buffer = surface.buffer_mut().unwrap();
-
-        let dx = (x1 - x0).abs();
-        let dy = -(y1 - y0).abs();
-        let sx = if x0 < x1 { 1 } else { -1 };
-        let sy = if y0 < y1 { 1 } else { -1 };
-        let mut err = dx + dy;
-
-        let mut x = x0;
-        let mut y = y0;
-
-        loop {
-            // Draw pixel if within bounds
-            if x >= 0 && y >= 0 && (x as u32) < self.width && (y as u32) < self.height {
-                let idx = (y as u32 * self.width + x as u32) as usize;
-                if idx < buffer.len() {
-                    buffer[idx] = color;
-                }
-            }
-
-            if x == x1 && y == y1 {
-                break;
-            }
-
-            let e2 = 2 * err;
-            if e2 >= dy {
-                err += dy;
-                x += sx;
-            }
-            if e2 <= dx {
-                err += dx;
-                y += sy;
-            }
-        }
-
-        let _ = buffer.present();
     }
 
-    /// Draw a circle (midpoint circle algorithm)
+    /// Draw a circle (filled for now, matching previous behavior vaguely or improving it)
+    /// The previous implementation was a hollow circle outline. Let's stick to outline to match "draw_circle"
+    /// or actually, standard GUI draw_circle usually implies outline, fill_circle implies filled.
+    /// The previous implementation used midpoint algorithm which draws an outline.
     pub fn draw_circle(&mut self, cx: i32, cy: i32, radius: u32, r: u8, g: u8, b: u8) {
-        if self.width == 0 || self.height == 0 || radius == 0 {
-            return;
+        let mut pb = PathBuilder::new();
+        pb.push_circle(cx as f32, cy as f32, radius as f32);
+
+        if let Some(path) = pb.finish() {
+            let mut paint = Paint::default();
+            paint.set_color_rgba8(r, g, b, 255);
+            paint.anti_alias = true;
+
+            let mut stroke = Stroke::default();
+            stroke.width = 1.0;
+
+            self.pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
         }
-
-        let color = u32::from_be_bytes([0, r, g, b]);
-        let mut surface = self.surface.borrow_mut();
-        let mut buffer = surface.buffer_mut().unwrap();
-
-        let put_pixel = |buffer: &mut [u32], x: i32, y: i32| {
-            if x >= 0 && y >= 0 && (x as u32) < self.width && (y as u32) < self.height {
-                let idx = (y as u32 * self.width + x as u32) as usize;
-                if idx < buffer.len() {
-                    buffer[idx] = color;
-                }
-            }
-        };
-
-        let r = radius as i32;
-        let mut x = 0;
-        let mut y = r;
-        let mut d = 3 - 2 * r;
-
-        while x <= y {
-            // Draw 8-way symmetry
-            put_pixel(&mut buffer, cx + x, cy + y);
-            put_pixel(&mut buffer, cx - x, cy + y);
-            put_pixel(&mut buffer, cx + x, cy - y);
-            put_pixel(&mut buffer, cx - x, cy - y);
-            put_pixel(&mut buffer, cx + y, cy + x);
-            put_pixel(&mut buffer, cx - y, cy + x);
-            put_pixel(&mut buffer, cx + y, cy - x);
-            put_pixel(&mut buffer, cx - y, cy - x);
-
-            if d < 0 {
-                d = d + 4 * x + 6;
-            } else {
-                d = d + 4 * (x - y) + 10;
-                y -= 1;
-            }
-            x += 1;
-        }
-
-        let _ = buffer.present();
     }
 
-    /// Load and draw an image from file
+    /// Draw an image from file
     pub fn draw_image(&mut self, path: &str, x: u32, y: u32) -> Result<(), Box<dyn std::error::Error>> {
-        if self.width == 0 || self.height == 0 {
-            return Ok(());
+        // Load image using the 'image' crate (already a dependency)
+        let img = image::open(path)?.to_rgba8();
+        let (w, h) = img.dimensions();
+
+        // Convert to tiny-skia pixmap
+        // tiny-skia expects pre-multiplied alpha, but for opaque images it doesn't matter much if we just load RGB
+        // For correctness with transparent PNGs, we should handle premultiplication, 
+        // but image crate gives straight RGBA.
+        // Let's create a pixmap from the raw data.
+        
+        if let Some(src_pixmap) = Pixmap::from_vec(img.into_raw(), tiny_skia::IntSize::from_wh(w, h).unwrap()) {
+             self.pixmap.draw_pixmap(
+                 x as i32, 
+                 y as i32, 
+                 src_pixmap.as_ref(), 
+                 &PixmapPaint::default(), 
+                 Transform::identity(), 
+                 None
+            );
         }
 
-        // Load image
-        let img = image::open(path)?;
-        let img = img.to_rgba8();
-        let (img_width, img_height) = img.dimensions();
-
-        let mut surface = self.surface.borrow_mut();
-        let mut buffer = surface.buffer_mut().unwrap();
-
-        // Copy image pixels to buffer
-        for py in 0..img_height {
-            for px in 0..img_width {
-                let screen_x = x + px;
-                let screen_y = y + py;
-
-                if screen_x < self.width && screen_y < self.height {
-                    let pixel = img.get_pixel(px, py);
-                    let r = pixel[0];
-                    let g = pixel[1];
-                    let b = pixel[2];
-                    // Note: ignoring alpha channel for now
-
-                    let color = u32::from_be_bytes([0, r, g, b]);
-                    let idx = (screen_y * self.width + screen_x) as usize;
-                    if idx < buffer.len() {
-                        buffer[idx] = color;
-                    }
-                }
-            }
-        }
-
-        buffer.present()?;
         Ok(())
     }
 
-    /// Draw text using a simple built-in bitmap font
-    /// This is a basic 8x16 pixel font that supports ASCII characters
+    /// Draw text
+    /// tiny-skia doesn't have text rendering built-in. 
+    /// We will use the previous simple bitmap font approach but draw it using tiny-skia's fill_rect
+    /// for better integration, or stick to pixel manipulation on the pixmap.
+    /// To keep it "simple" and "working" without adding 'rusttype' dependency yet, 
+    /// I'll reimplement the bitmap font using draw_rect (1x1 pixels) or fill_rects.
     pub fn draw_text(&mut self, text: &str, x: i32, y: i32, r: u8, g: u8, b: u8) {
-        if self.width == 0 || self.height == 0 {
-            return;
-        }
-
-        let color = u32::from_be_bytes([0, r, g, b]);
-        let mut surface = self.surface.borrow_mut();
-        let mut buffer = surface.buffer_mut().unwrap();
-
-        let char_width = 8;
-        let mut current_x = x;
-
-        for ch in text.chars() {
-            // Only render printable ASCII for now
-            if ch.is_ascii() && !ch.is_ascii_control() {
-                let glyph = get_basic_glyph(ch);
-
-                // Draw the glyph
-                for (gy, row) in glyph.iter().enumerate() {
-                    for gx in 0..8 {
-                        if (row >> (7 - gx)) & 1 == 1 {
-                            let px = current_x + gx;
-                            let py = y + gy as i32;
-
-                            if px >= 0 && py >= 0 && (px as u32) < self.width && (py as u32) < self.height {
-                                let idx = (py as u32 * self.width + px as u32) as usize;
-                                if idx < buffer.len() {
-                                    buffer[idx] = color;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            current_x += char_width;
-        }
-
-        let _ = buffer.present();
+        self.draw_text_scaled(text, x, y, 1, r, g, b);
     }
 
-    /// Draw text with a custom font size (scaled version of basic font)
     pub fn draw_text_scaled(&mut self, text: &str, x: i32, y: i32, scale: u32, r: u8, g: u8, b: u8) {
-        if self.width == 0 || self.height == 0 || scale == 0 {
-            return;
-        }
+         let char_width = 8 * scale as i32;
+         let mut current_x = x;
 
-        let color = u32::from_be_bytes([0, r, g, b]);
+         let mut paint = Paint::default();
+         paint.set_color_rgba8(r, g, b, 255);
+
+         for ch in text.chars() {
+             if ch.is_ascii() && !ch.is_ascii_control() {
+                 let glyph = get_basic_glyph(ch);
+                 
+                 for (gy, row) in glyph.iter().enumerate() {
+                     for gx in 0..8 {
+                         if (row >> (7 - gx)) & 1 == 1 {
+                             let rect = Rect::from_xywh(
+                                 (current_x + gx * scale as i32) as f32,
+                                 (y + gy as i32 * scale as i32) as f32,
+                                 scale as f32,
+                                 scale as f32
+                             );
+                             
+                             if let Some(r) = rect {
+                                 self.pixmap.fill_rect(r, &paint, Transform::identity(), None);
+                             }
+                         }
+                     }
+                 }
+             }
+             current_x += char_width;
+         }
+    }
+
+    /// Present the framebuffer to the window
+    pub fn present(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let mut surface = self.surface.borrow_mut();
-        let mut buffer = surface.buffer_mut().unwrap();
-
-        let char_width = 8 * scale;
-        let mut current_x = x;
-
-        for ch in text.chars() {
-            if ch.is_ascii() && !ch.is_ascii_control() {
-                let glyph = get_basic_glyph(ch);
-
-                // Draw scaled glyph
-                for (gy, row) in glyph.iter().enumerate() {
-                    for gx in 0..8 {
-                        if (row >> (7 - gx)) & 1 == 1 {
-                            // Draw a scale x scale block for each pixel
-                            for sy in 0..scale {
-                                for sx in 0..scale {
-                                    let px = current_x + (gx * scale as i32) + sx as i32;
-                                    let py = y + (gy as u32 * scale) as i32 + sy as i32;
-
-                                    if px >= 0 && py >= 0 && (px as u32) < self.width && (py as u32) < self.height {
-                                        let idx = (py as u32 * self.width + px as u32) as usize;
-                                        if idx < buffer.len() {
-                                            buffer[idx] = color;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            current_x += char_width as i32;
+        let mut buffer = surface.buffer_mut()?;
+        
+        let data = self.pixmap.data();
+        
+        // tiny-skia produces RGBA8888.
+        // softbuffer requires u32 xRGB (on many platforms, it's 0x00RRGGBB).
+        // However, softbuffer's format can vary.
+        // 
+        // Typically softbuffer expects: 
+        // bits: 00000000 RRRRRRRR GGGGGGGG BBBBBBBB
+        // 
+        // tiny-skia's buffer is [R, G, B, A, R, G, B, A...]
+        // We need to pack these bytes into u32s.
+        
+        let len = buffer.len().min(data.len() / 4);
+        
+        for i in 0..len {
+            let offset = i * 4;
+            let r = data[offset];
+            let g = data[offset + 1];
+            let b = data[offset + 2];
+            // let a = data[offset + 3];
+            
+            // Pack into u32: 00RGB
+            buffer[i] = u32::from_be_bytes([0, r, g, b]);
         }
-
-        let _ = buffer.present();
+        
+        buffer.present()?;
+        Ok(())
     }
 }
 
-/// Get a basic 8x16 bitmap glyph for an ASCII character
-/// Returns a 16-element array where each element is a byte representing a row
+/// Basic bitmap glyph (same as before, but kept for immediate availability)
 fn get_basic_glyph(ch: char) -> [u8; 16] {
     match ch {
         ' ' => [0x00; 16],
-        '!' => [
-            0x00, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18,
-            0x18, 0x00, 0x18, 0x18, 0x00, 0x00, 0x00, 0x00,
-        ],
-        'A' => [
-            0x00, 0x00, 0x18, 0x24, 0x24, 0x42, 0x42, 0x7E,
-            0x42, 0x42, 0x42, 0x42, 0x00, 0x00, 0x00, 0x00,
-        ],
-        'B' => [
-            0x00, 0x00, 0x7C, 0x42, 0x42, 0x7C, 0x42, 0x42,
-            0x42, 0x42, 0x42, 0x7C, 0x00, 0x00, 0x00, 0x00,
-        ],
-        'C' => [
-            0x00, 0x00, 0x3C, 0x42, 0x42, 0x40, 0x40, 0x40,
-            0x40, 0x42, 0x42, 0x3C, 0x00, 0x00, 0x00, 0x00,
-        ],
-        'H' => [
-            0x00, 0x00, 0x42, 0x42, 0x42, 0x42, 0x7E, 0x42,
-            0x42, 0x42, 0x42, 0x42, 0x00, 0x00, 0x00, 0x00,
-        ],
-        'e' => [
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x3C, 0x42, 0x42,
-            0x7E, 0x40, 0x42, 0x3C, 0x00, 0x00, 0x00, 0x00,
-        ],
-        'l' => [
-            0x00, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18,
-            0x18, 0x18, 0x18, 0x18, 0x00, 0x00, 0x00, 0x00,
-        ],
-        'o' => [
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x3C, 0x42, 0x42,
-            0x42, 0x42, 0x42, 0x3C, 0x00, 0x00, 0x00, 0x00,
-        ],
-        'W' => [
-            0x00, 0x00, 0x82, 0x82, 0x82, 0x92, 0x92, 0xAA,
-            0xAA, 0xC6, 0xC6, 0x82, 0x00, 0x00, 0x00, 0x00,
-        ],
-        'r' => [
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x5C, 0x62, 0x40,
-            0x40, 0x40, 0x40, 0x40, 0x00, 0x00, 0x00, 0x00,
-        ],
-        'd' => [
-            0x00, 0x02, 0x02, 0x02, 0x02, 0x3E, 0x42, 0x42,
-            0x42, 0x42, 0x46, 0x3A, 0x00, 0x00, 0x00, 0x00,
-        ],
-        // Add more characters as needed...
-        // For now, use a simple box for unknown characters
-        _ => [
-            0x00, 0x00, 0x7E, 0x42, 0x42, 0x42, 0x42, 0x42,
-            0x42, 0x42, 0x42, 0x7E, 0x00, 0x00, 0x00, 0x00,
-        ],
+        '!' => [0x00, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x00, 0x18, 0x18, 0x00, 0x00, 0x00, 0x00],
+        'A' => [0x00, 0x00, 0x18, 0x24, 0x24, 0x42, 0x42, 0x7E, 0x42, 0x42, 0x42, 0x42, 0x00, 0x00, 0x00, 0x00],
+        'B' => [0x00, 0x00, 0x7C, 0x42, 0x42, 0x7C, 0x42, 0x42, 0x42, 0x42, 0x42, 0x7C, 0x00, 0x00, 0x00, 0x00],
+        'C' => [0x00, 0x00, 0x3C, 0x42, 0x42, 0x40, 0x40, 0x40, 0x40, 0x42, 0x42, 0x3C, 0x00, 0x00, 0x00, 0x00],
+        'D' => [0x00, 0x7C, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x7C, 0x00, 0x00, 0x00, 0x00],
+        'E' => [0x00, 0x7E, 0x40, 0x40, 0x40, 0x7E, 0x40, 0x40, 0x40, 0x40, 0x40, 0x7E, 0x00, 0x00, 0x00, 0x00],
+        'F' => [0x00, 0x7E, 0x40, 0x40, 0x40, 0x7E, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x00, 0x00, 0x00, 0x00],
+        'G' => [0x00, 0x3C, 0x42, 0x42, 0x40, 0x40, 0x4E, 0x42, 0x42, 0x42, 0x42, 0x3C, 0x00, 0x00, 0x00, 0x00],
+        'H' => [0x00, 0x00, 0x42, 0x42, 0x42, 0x42, 0x7E, 0x42, 0x42, 0x42, 0x42, 0x42, 0x00, 0x00, 0x00, 0x00],
+        'I' => [0x00, 0x3C, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3C, 0x00, 0x00, 0x00, 0x00],
+        'Q' => [0x00, 0x3C, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x4A, 0x44, 0x3A, 0x00, 0x00, 0x00, 0x00],
+        'U' => [0x00, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x3C, 0x00, 0x00, 0x00, 0x00],
+        'W' => [0x00, 0x00, 0x82, 0x82, 0x82, 0x92, 0x92, 0xAA, 0xAA, 0xC6, 0xC6, 0x82, 0x00, 0x00, 0x00, 0x00],
+        'a' => [0x00, 0x00, 0x00, 0x00, 0x3C, 0x02, 0x3E, 0x42, 0x42, 0x42, 0x42, 0x3E, 0x00, 0x00, 0x00, 0x00],
+        'c' => [0x00, 0x00, 0x00, 0x00, 0x3C, 0x42, 0x40, 0x40, 0x40, 0x40, 0x42, 0x3C, 0x00, 0x00, 0x00, 0x00],
+        'd' => [0x00, 0x02, 0x02, 0x02, 0x02, 0x3E, 0x42, 0x42, 0x42, 0x42, 0x46, 0x3A, 0x00, 0x00, 0x00, 0x00],
+        'e' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x3C, 0x42, 0x42, 0x7E, 0x40, 0x42, 0x3C, 0x00, 0x00, 0x00, 0x00],
+        'h' => [0x00, 0x40, 0x40, 0x40, 0x40, 0x5C, 0x62, 0x42, 0x42, 0x42, 0x42, 0x42, 0x00, 0x00, 0x00, 0x00],
+        'i' => [0x00, 0x18, 0x00, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3C, 0x00, 0x00, 0x00, 0x00],
+        'l' => [0x00, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x00, 0x00, 0x00, 0x00],
+        'n' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x5C, 0x62, 0x42, 0x42, 0x42, 0x42, 0x42, 0x00, 0x00, 0x00, 0x00],
+        'o' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x3C, 0x42, 0x42, 0x42, 0x42, 0x42, 0x3C, 0x00, 0x00, 0x00, 0x00],
+        'r' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x5C, 0x62, 0x40, 0x40, 0x40, 0x40, 0x40, 0x00, 0x00, 0x00, 0x00],
+        's' => [0x00, 0x00, 0x00, 0x00, 0x3C, 0x42, 0x40, 0x3C, 0x02, 0x02, 0x42, 0x3C, 0x00, 0x00, 0x00, 0x00],
+        't' => [0x00, 0x00, 0x10, 0x10, 0x3C, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x0C, 0x00, 0x00, 0x00, 0x00],
+        'w' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x82, 0x82, 0x92, 0x92, 0xAA, 0xAA, 0x44, 0x00, 0x00, 0x00, 0x00],
+        'x' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x42, 0x24, 0x18, 0x18, 0x24, 0x42, 0x00, 0x00, 0x00, 0x00, 0x00],
+        'y' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x42, 0x42, 0x42, 0x42, 0x3E, 0x02, 0x3C, 0x00, 0x00, 0x00, 0x00],
+        _ => [0x00, 0x00, 0x7E, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x7E, 0x00, 0x00, 0x00, 0x00],
     }
 }

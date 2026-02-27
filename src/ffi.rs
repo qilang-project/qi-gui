@@ -11,6 +11,18 @@ use crate::window::Window;
 use crate::keycode;
 use crate::audio::AudioPlayer;
 
+/// Drawing command for deferred rendering
+#[derive(Debug, Clone)]
+enum DrawCommand {
+    Clear { r: u8, g: u8, b: u8 },
+    Pixel { x: u32, y: u32, r: u8, g: u8, b: u8 },
+    Rect { x: u32, y: u32, width: u32, height: u32, r: u8, g: u8, b: u8 },
+    Line { x0: i32, y0: i32, x1: i32, y1: i32, r: u8, g: u8, b: u8 },
+    Circle { cx: i32, cy: i32, radius: u32, r: u8, g: u8, b: u8 },
+    Image { path: String, x: u32, y: u32 },
+    Text { text: String, x: i32, y: i32, scale: u32, r: u8, g: u8, b: u8 },
+}
+
 /// Event callback function type
 /// Parameters: window_id, event_type, param1, param2
 /// event_type:
@@ -42,6 +54,8 @@ struct GuiState {
     created_windows: HashMap<u64, Window>,
     current_modifiers: tao::keyboard::ModifiersState,
     next_audio_id: u64,
+    // Store pending draw commands: window_id -> commands
+    pending_draw_commands: HashMap<u64, Vec<DrawCommand>>,
 }
 
 impl GuiState {
@@ -55,6 +69,7 @@ impl GuiState {
             created_windows: HashMap::new(),
             current_modifiers: tao::keyboard::ModifiersState::empty(),
             next_audio_id: 1,
+            pending_draw_commands: HashMap::new(),
         }
     }
 }
@@ -377,18 +392,20 @@ pub extern "C" fn qi_gui_set_size_impl(window_id: u64, width: u32, height: u32) 
 #[no_mangle]
 pub extern "C" fn qi_gui_run_impl() {
     // Get pending window requests and callbacks
-    let (pending_windows, callbacks) = {
+    let (pending_windows, callbacks, mut pending_draw_commands, created_windows_map) = {
         let mut state = get_gui_state();
         if let Some(state) = state.as_mut() {
             let windows = std::mem::take(&mut state.pending_windows);
+            let commands = std::mem::take(&mut state.pending_draw_commands);
             let callbacks = state.event_callbacks.clone();
-            (windows, callbacks)
+            let created = state.created_windows.clone();
+            (windows, callbacks, commands, created)
         } else {
-            (Vec::new(), HashMap::new())
+            (Vec::new(), HashMap::new(), HashMap::new(), HashMap::new())
         }
     };
 
-    if pending_windows.is_empty() {
+    if pending_windows.is_empty() && created_windows_map.is_empty() {
         return;
     }
 
@@ -398,6 +415,8 @@ pub extern "C" fn qi_gui_run_impl() {
     // Create all pending windows and build window ID mapping
     let mut windows = Vec::new();
     let mut window_id_map = HashMap::new();
+    // Local copy of created windows for the closure
+    let mut local_created_windows = created_windows_map;
 
     for request in pending_windows {
         match Window::new(&event_loop, &request.title, request.width, request.height) {
@@ -407,14 +426,7 @@ pub extern "C" fn qi_gui_run_impl() {
 
                 // Map Tao WindowId to our u64 ID
                 window_id_map.insert(window.id(), request.id);
-
-                // Store window in global state for later access
-                {
-                    let mut state = get_gui_state();
-                    if let Some(state) = state.as_mut() {
-                        state.created_windows.insert(request.id, window.clone());
-                    }
-                }
+                local_created_windows.insert(request.id, window.clone());
 
                 windows.push(window);
             }
@@ -422,11 +434,12 @@ pub extern "C" fn qi_gui_run_impl() {
         }
     }
 
-    // Store window_id_map in global state
+    // Store window_id_map and updated created_windows in global state before running
     {
         let mut state = get_gui_state();
         if let Some(state) = state.as_mut() {
             state.window_id_map = window_id_map.clone();
+            state.created_windows = local_created_windows.clone();
         }
     }
 
@@ -435,6 +448,60 @@ pub extern "C" fn qi_gui_run_impl() {
         *control_flow = ControlFlow::Wait;
 
         match event {
+            Event::MainEventsCleared => {
+                // Request redraw for all windows on first pass to ensure content is shown
+                for window in &windows {
+                    // Try catch lock failure
+                    if let Ok(guard) = window.inner().try_lock() {
+                        guard.request_redraw();
+                    }
+                }
+            }
+            Event::RedrawRequested(window_id) => {
+                let our_window_id = window_id_map.get(&window_id).copied().unwrap_or(0);
+                if our_window_id == 0 { return; }
+
+                let renderer_id = our_window_id * 1000 + 1;
+
+                // Create renderer if it doesn't exist yet
+                RENDERERS.with(|renderers| {
+                    let mut renderers = renderers.borrow_mut();
+                    if !renderers.contains_key(&renderer_id) {
+                         if let Some(window) = local_created_windows.get(&our_window_id) {
+                             if let Ok(renderer) = Renderer::new_from_arc_mutex(window.inner()) {
+                                 renderers.insert(renderer_id, renderer);
+                             }
+                         }
+                    }
+                });
+
+                // Execute pending draw commands if any
+                if let Some(commands) = pending_draw_commands.remove(&our_window_id) {
+                    RENDERERS.with(|renderers| {
+                        if let Some(renderer) = renderers.borrow_mut().get_mut(&renderer_id) {
+                            for cmd in commands {
+                                match cmd {
+                                    DrawCommand::Clear { r, g, b } => renderer.clear(r, g, b),
+                                    DrawCommand::Pixel { x, y, r, g, b } => renderer.draw_pixel(x, y, r, g, b),
+                                    DrawCommand::Rect { x, y, width, height, r, g, b } => renderer.draw_rect(x, y, width, height, r, g, b),
+                                    DrawCommand::Line { x0, y0, x1, y1, r, g, b } => renderer.draw_line(x0, y0, x1, y1, r, g, b),
+                                    DrawCommand::Circle { cx, cy, radius, r, g, b } => renderer.draw_circle(cx, cy, radius, r, g, b),
+                                    DrawCommand::Image { path, x, y } => { let _ = renderer.draw_image(&path, x, y); },
+                                    DrawCommand::Text { text, x, y, scale, r, g, b } => {
+                                        if scale <= 1 {
+                                            renderer.draw_text(&text, x, y, r, g, b);
+                                        } else {
+                                            renderer.draw_text_scaled(&text, x, y, scale, r, g, b);
+                                        }
+                                    }
+                                }
+                                // Crucial: Present the results to the surface
+                                let _ = renderer.present();
+                            }
+                        }
+                    });
+                }
+            }
             Event::WindowEvent { window_id, event, .. } => {
                 // Get our window ID from Tao's WindowId
                 let our_window_id = window_id_map.get(&window_id).copied().unwrap_or(0);
@@ -707,28 +774,36 @@ pub extern "C" fn qi_gui_renderer_create_impl(window_id: u64) -> u64 {
         return 0;
     };
 
-    // Get the window
-    let Some(window) = state.created_windows.get(&window_id) else {
-        eprintln!("Error: Window ID {} not found", window_id);
-        return 0;
-    };
+    // Check if window is created
+    if let Some(window) = state.created_windows.get(&window_id) {
+        // Create renderer from the window's Arc<Mutex<TaoWindow>>
+        let tao_window = window.inner();
+        match Renderer::new_from_arc_mutex(tao_window) {
+            Ok(renderer) => {
+                // Generate renderer ID
+                let renderer_id = window_id * 1000 + 1; // Simple ID generation
 
-    // Create renderer from the window's Arc<Mutex<TaoWindow>>
-    let tao_window = window.inner();
-    match Renderer::new_from_arc_mutex(tao_window) {
-        Ok(renderer) => {
-            // Generate renderer ID
-            let renderer_id = window_id * 1000 + 1; // Simple ID generation
+                // Store renderer in thread-local storage
+                RENDERERS.with(|renderers| {
+                    renderers.borrow_mut().insert(renderer_id, renderer);
+                });
 
-            // Store renderer in thread-local storage
-            RENDERERS.with(|renderers| {
-                renderers.borrow_mut().insert(renderer_id, renderer);
-            });
-
-            renderer_id
+                renderer_id
+            }
+            Err(e) => {
+                eprintln!("Failed to create renderer: {}", e);
+                0
+            }
         }
-        Err(e) => {
-            eprintln!("Failed to create renderer: {}", e);
+    } else {
+        // Check if window is pending
+        if state.pending_windows.iter().any(|w| w.id == window_id) {
+            // Window is pending, return a predicted renderer ID
+            // We will create the actual renderer later in run()
+            let renderer_id = window_id * 1000 + 1;
+            renderer_id
+        } else {
+            eprintln!("Error: Window ID {} not found", window_id);
             0
         }
     }
@@ -741,11 +816,31 @@ pub extern "C" fn qi_gui_renderer_clear_impl(renderer_id: u64, r: u8, g: u8, b: 
         return;
     }
 
-    RENDERERS.with(|renderers| {
+    let drawn = RENDERERS.with(|renderers| {
         if let Some(renderer) = renderers.borrow_mut().get_mut(&renderer_id) {
             renderer.clear(r, g, b);
+            let _ = renderer.present();
+            true
+        } else {
+            false
         }
     });
+
+    if !drawn {
+        // Try to queue command
+        // Assume renderer_id = window_id * 1000 + 1
+        let window_id = (renderer_id - 1) / 1000;
+        let mut state = get_gui_state();
+        if let Some(state) = state.as_mut() {
+            // Only queue if window is actually pending
+            if state.pending_windows.iter().any(|w| w.id == window_id) {
+                state.pending_draw_commands
+                    .entry(window_id)
+                    .or_insert_with(Vec::new)
+                    .push(DrawCommand::Clear { r, g, b });
+            }
+        }
+    }
 }
 
 /// Draw a filled rectangle
@@ -764,11 +859,28 @@ pub extern "C" fn qi_gui_renderer_draw_rect_impl(
         return;
     }
 
-    RENDERERS.with(|renderers| {
+    let drawn = RENDERERS.with(|renderers| {
         if let Some(renderer) = renderers.borrow_mut().get_mut(&renderer_id) {
             renderer.draw_rect(x, y, width, height, r, g, b);
+            let _ = renderer.present();
+            true
+        } else {
+            false
         }
     });
+
+    if !drawn {
+        let window_id = (renderer_id - 1) / 1000;
+        let mut state = get_gui_state();
+        if let Some(state) = state.as_mut() {
+            if state.pending_windows.iter().any(|w| w.id == window_id) {
+                state.pending_draw_commands
+                    .entry(window_id)
+                    .or_insert_with(Vec::new)
+                    .push(DrawCommand::Rect { x, y, width, height, r, g, b });
+            }
+        }
+    }
 }
 
 /// Draw a single pixel
@@ -946,15 +1058,32 @@ pub extern "C" fn qi_gui_renderer_draw_text_impl(
 
     let c_str = unsafe { CStr::from_ptr(text) };
     let text_str = match c_str.to_str() {
-        Ok(s) => s,
+        Ok(s) => s.to_string(),
         Err(_) => return,
     };
 
-    RENDERERS.with(|renderers| {
+    let drawn = RENDERERS.with(|renderers| {
         if let Some(renderer) = renderers.borrow_mut().get_mut(&renderer_id) {
-            renderer.draw_text(text_str, x, y, r, g, b);
+            renderer.draw_text(&text_str, x, y, r, g, b);
+            let _ = renderer.present();
+            true
+        } else {
+            false
         }
     });
+
+    if !drawn {
+        let window_id = (renderer_id - 1) / 1000;
+        let mut state = get_gui_state();
+        if let Some(state) = state.as_mut() {
+            if state.pending_windows.iter().any(|w| w.id == window_id) {
+                state.pending_draw_commands
+                    .entry(window_id)
+                    .or_insert_with(Vec::new)
+                    .push(DrawCommand::Text { text: text_str, x, y, scale: 1, r, g, b });
+            }
+        }
+    }
 }
 
 /// Draw text with custom scale
