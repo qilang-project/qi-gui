@@ -1,6 +1,6 @@
 [package]
 name = "qi-gui"
-version = "0.1.0"
+version = "2026.4.24.1"
 edition = "2021"
 authors = ["Qi Language Team"]
 description = "GUI library for Qi programming language"
