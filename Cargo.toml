@@ -28,6 +28,9 @@ rodio = "0.19"
 once_cell = "1.20"
 tiny-skia = "0.11.4"
 
+# 文本排版与整形（真正的字体渲染，支持 CJK，替代手写位图字体）
+cosmic-text = "0.12"
+
 [build-dependencies]
 cbindgen = "0.27"
 

@@ -3,7 +3,7 @@
 //! Shows all keyboard events including character keys, function keys,
 //! and modifier key combinations.
 
-use qi_gui::{Window, EventLoop};
+use qi_gui::{EventLoop, Window};
 
 fn main() {
     println!("=== Keyboard Event Demo ===");
@@ -25,9 +25,9 @@ fn main() {
     let mut modifiers = tao::keyboard::ModifiersState::empty();
 
     event_loop.run(move |event, _event_loop, control_flow| {
+        use qi_gui::keycode;
         use tao::event::{Event, WindowEvent};
         use tao::event_loop::ControlFlow;
-        use qi_gui::keycode;
 
         *control_flow = ControlFlow::Wait;
 
@@ -46,7 +46,10 @@ fn main() {
                 modifiers = new_modifiers;
             }
             Event::WindowEvent {
-                event: WindowEvent::KeyboardInput { event: key_event, .. },
+                event:
+                    WindowEvent::KeyboardInput {
+                        event: key_event, ..
+                    },
                 ..
             } => {
                 // Get keycode
@@ -62,10 +65,18 @@ fn main() {
 
                 // Format modifier keys
                 let mut mods = Vec::new();
-                if modifier_mask & (1 << 0) != 0 { mods.push("Shift"); }
-                if modifier_mask & (1 << 1) != 0 { mods.push("Ctrl"); }
-                if modifier_mask & (1 << 2) != 0 { mods.push("Alt"); }
-                if modifier_mask & (1 << 3) != 0 { mods.push("Cmd"); }
+                if modifier_mask & (1 << 0) != 0 {
+                    mods.push("Shift");
+                }
+                if modifier_mask & (1 << 1) != 0 {
+                    mods.push("Ctrl");
+                }
+                if modifier_mask & (1 << 2) != 0 {
+                    mods.push("Alt");
+                }
+                if modifier_mask & (1 << 3) != 0 {
+                    mods.push("Cmd");
+                }
 
                 if mods.is_empty() {
                     println!("Key pressed: {}", key_name);

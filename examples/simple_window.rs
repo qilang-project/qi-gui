@@ -2,7 +2,7 @@
 //!
 //! Creates a basic window and runs the event loop.
 
-use qi_gui::{Window, EventLoop};
+use qi_gui::{EventLoop, Window};
 
 fn main() {
     println!("=== Simple Window Example ===");

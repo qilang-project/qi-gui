@@ -3,7 +3,6 @@
 ///
 /// Note: Due to rodio's OutputStream not being Send/Sync, we cannot use
 /// a global static. Instead, each audio player manages its own stream.
-
 use rodio::{Decoder, OutputStream, Sink, Source};
 use std::fs::File;
 use std::io::BufReader;
@@ -11,7 +10,7 @@ use std::io::BufReader;
 /// Audio player for a single sound
 /// Each player maintains its own audio output stream
 pub struct AudioPlayer {
-    _stream: OutputStream,  // Keep stream alive
+    _stream: OutputStream, // Keep stream alive
     sink: Sink,
 }
 

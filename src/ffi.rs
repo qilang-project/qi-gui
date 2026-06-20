@@ -1,26 +1,71 @@
 //! C FFI interface for Qi language
 
+use crate::audio::AudioPlayer;
+use crate::keycode;
+use crate::window::Window;
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::sync::Mutex;
-use std::collections::HashMap;
-use tao::event_loop::{EventLoop as TaoEventLoop, ControlFlow};
 use tao::event::Event;
+use tao::event_loop::{ControlFlow, EventLoop as TaoEventLoop};
 use tao::window::WindowId;
-use crate::window::Window;
-use crate::keycode;
-use crate::audio::AudioPlayer;
 
 /// Drawing command for deferred rendering
 #[derive(Debug, Clone)]
 enum DrawCommand {
-    Clear { r: u8, g: u8, b: u8 },
-    Pixel { x: u32, y: u32, r: u8, g: u8, b: u8 },
-    Rect { x: u32, y: u32, width: u32, height: u32, r: u8, g: u8, b: u8 },
-    Line { x0: i32, y0: i32, x1: i32, y1: i32, r: u8, g: u8, b: u8 },
-    Circle { cx: i32, cy: i32, radius: u32, r: u8, g: u8, b: u8 },
-    Image { path: String, x: u32, y: u32 },
-    Text { text: String, x: i32, y: i32, scale: u32, r: u8, g: u8, b: u8 },
+    Clear {
+        r: u8,
+        g: u8,
+        b: u8,
+    },
+    Pixel {
+        x: u32,
+        y: u32,
+        r: u8,
+        g: u8,
+        b: u8,
+    },
+    Rect {
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        r: u8,
+        g: u8,
+        b: u8,
+    },
+    Line {
+        x0: i32,
+        y0: i32,
+        x1: i32,
+        y1: i32,
+        r: u8,
+        g: u8,
+        b: u8,
+    },
+    Circle {
+        cx: i32,
+        cy: i32,
+        radius: u32,
+        r: u8,
+        g: u8,
+        b: u8,
+    },
+    Image {
+        path: String,
+        x: u32,
+        y: u32,
+    },
+    Text {
+        text: String,
+        x: i32,
+        y: i32,
+        scale: u32,
+        r: u8,
+        g: u8,
+        b: u8,
+    },
 }
 
 /// Event callback function type
@@ -77,8 +122,8 @@ impl GuiState {
 static GUI_STATE: Mutex<Option<GuiState>> = Mutex::new(None);
 
 // Audio players stored separately (not Send/Sync safe)
-use std::cell::RefCell;
 use crate::renderer::Renderer;
+use std::cell::RefCell;
 
 thread_local! {
     static AUDIO_PLAYERS: RefCell<HashMap<u64, AudioPlayer>> = RefCell::new(HashMap::new());
@@ -96,11 +141,7 @@ fn get_gui_state() -> std::sync::MutexGuard<'static, Option<GuiState>> {
 /// Create a window (queued until run is called)
 /// Returns a window ID (non-zero on success, 0 on failure)
 #[no_mangle]
-pub extern "C" fn qi_gui_create_window_impl(
-    title: *const c_char,
-    width: u32,
-    height: u32,
-) -> u64 {
+pub extern "C" fn qi_gui_create_window_impl(title: *const c_char, width: u32, height: u32) -> u64 {
     if title.is_null() {
         return 0;
     }
@@ -238,15 +279,28 @@ extern "C" fn default_event_callback(window_id: u64, event_type: i32, param1: i6
 
             // Format modifier keys
             let mut mods = Vec::new();
-            if modifiers & (1 << 0) != 0 { mods.push("Shift"); }
-            if modifiers & (1 << 1) != 0 { mods.push("Ctrl"); }
-            if modifiers & (1 << 2) != 0 { mods.push("Alt"); }
-            if modifiers & (1 << 3) != 0 { mods.push("Cmd"); }
+            if modifiers & (1 << 0) != 0 {
+                mods.push("Shift");
+            }
+            if modifiers & (1 << 1) != 0 {
+                mods.push("Ctrl");
+            }
+            if modifiers & (1 << 2) != 0 {
+                mods.push("Alt");
+            }
+            if modifiers & (1 << 3) != 0 {
+                mods.push("Cmd");
+            }
 
             if mods.is_empty() {
                 println!("[窗口 {}] 键盘事件: {}", window_id, key_name);
             } else {
-                println!("[窗口 {}] 键盘事件: {} + {}", window_id, mods.join("+"), key_name);
+                println!(
+                    "[窗口 {}] 键盘事件: {} + {}",
+                    window_id,
+                    mods.join("+"),
+                    key_name
+                );
             }
         }
         3 => {
@@ -257,10 +311,16 @@ extern "C" fn default_event_callback(window_id: u64, event_type: i32, param1: i6
                 _ => "未知",
             };
             let state_name = if param2 == 1 { "按下" } else { "释放" };
-            println!("[窗口 {}] 鼠标{}事件: {}", window_id, button_name, state_name);
+            println!(
+                "[窗口 {}] 鼠标{}事件: {}",
+                window_id, button_name, state_name
+            );
         }
         4 => println!("[窗口 {}] 鼠标移动: x={}, y={}", window_id, param1, param2),
-        5 => println!("[窗口 {}] 鼠标滚轮: dx={}, dy={}", window_id, param1, param2),
+        5 => println!(
+            "[窗口 {}] 鼠标滚轮: dx={}, dy={}",
+            window_id, param1, param2
+        ),
         _ => println!("[窗口 {}] 未知事件类型: {}", window_id, event_type),
     }
 }
@@ -415,6 +475,8 @@ pub extern "C" fn qi_gui_run_impl() {
     // Create all pending windows and build window ID mapping
     let mut windows = Vec::new();
     let mut window_id_map = HashMap::new();
+    // 每个窗口的设备像素比，用于把物理坐标的光标位置换算成逻辑坐标交给上层。
+    let mut window_scale_map: HashMap<u64, f64> = HashMap::new();
     // Local copy of created windows for the closure
     let mut local_created_windows = created_windows_map;
 
@@ -423,6 +485,14 @@ pub extern "C" fn qi_gui_run_impl() {
             Ok(window) => {
                 // Make window visible
                 window.show();
+
+                // 记录设备像素比（retina 上为 2.0）
+                let sf = window
+                    .inner()
+                    .lock()
+                    .map(|g| g.scale_factor())
+                    .unwrap_or(1.0);
+                window_scale_map.insert(request.id, sf);
 
                 // Map Tao WindowId to our u64 ID
                 window_id_map.insert(window.id(), request.id);
@@ -459,7 +529,9 @@ pub extern "C" fn qi_gui_run_impl() {
             }
             Event::RedrawRequested(window_id) => {
                 let our_window_id = window_id_map.get(&window_id).copied().unwrap_or(0);
-                if our_window_id == 0 { return; }
+                if our_window_id == 0 {
+                    return;
+                }
 
                 let renderer_id = our_window_id * 1000 + 1;
 
@@ -467,11 +539,11 @@ pub extern "C" fn qi_gui_run_impl() {
                 RENDERERS.with(|renderers| {
                     let mut renderers = renderers.borrow_mut();
                     if !renderers.contains_key(&renderer_id) {
-                         if let Some(window) = local_created_windows.get(&our_window_id) {
-                             if let Ok(renderer) = Renderer::new_from_arc_mutex(window.inner()) {
-                                 renderers.insert(renderer_id, renderer);
-                             }
-                         }
+                        if let Some(window) = local_created_windows.get(&our_window_id) {
+                            if let Ok(renderer) = Renderer::new_from_arc_mutex(window.inner()) {
+                                renderers.insert(renderer_id, renderer);
+                            }
+                        }
                     }
                 });
 
@@ -482,12 +554,47 @@ pub extern "C" fn qi_gui_run_impl() {
                             for cmd in commands {
                                 match cmd {
                                     DrawCommand::Clear { r, g, b } => renderer.clear(r, g, b),
-                                    DrawCommand::Pixel { x, y, r, g, b } => renderer.draw_pixel(x, y, r, g, b),
-                                    DrawCommand::Rect { x, y, width, height, r, g, b } => renderer.draw_rect(x, y, width, height, r, g, b),
-                                    DrawCommand::Line { x0, y0, x1, y1, r, g, b } => renderer.draw_line(x0, y0, x1, y1, r, g, b),
-                                    DrawCommand::Circle { cx, cy, radius, r, g, b } => renderer.draw_circle(cx, cy, radius, r, g, b),
-                                    DrawCommand::Image { path, x, y } => { let _ = renderer.draw_image(&path, x, y); },
-                                    DrawCommand::Text { text, x, y, scale, r, g, b } => {
+                                    DrawCommand::Pixel { x, y, r, g, b } => {
+                                        renderer.draw_pixel(x, y, r, g, b)
+                                    }
+                                    DrawCommand::Rect {
+                                        x,
+                                        y,
+                                        width,
+                                        height,
+                                        r,
+                                        g,
+                                        b,
+                                    } => renderer.draw_rect(x, y, width, height, r, g, b),
+                                    DrawCommand::Line {
+                                        x0,
+                                        y0,
+                                        x1,
+                                        y1,
+                                        r,
+                                        g,
+                                        b,
+                                    } => renderer.draw_line(x0, y0, x1, y1, r, g, b),
+                                    DrawCommand::Circle {
+                                        cx,
+                                        cy,
+                                        radius,
+                                        r,
+                                        g,
+                                        b,
+                                    } => renderer.draw_circle(cx, cy, radius, r, g, b),
+                                    DrawCommand::Image { path, x, y } => {
+                                        let _ = renderer.draw_image(&path, x, y);
+                                    }
+                                    DrawCommand::Text {
+                                        text,
+                                        x,
+                                        y,
+                                        scale,
+                                        r,
+                                        g,
+                                        b,
+                                    } => {
                                         if scale <= 1 {
                                             renderer.draw_text(&text, x, y, r, g, b);
                                         } else {
@@ -502,7 +609,9 @@ pub extern "C" fn qi_gui_run_impl() {
                     });
                 }
             }
-            Event::WindowEvent { window_id, event, .. } => {
+            Event::WindowEvent {
+                window_id, event, ..
+            } => {
                 // Get our window ID from Tao's WindowId
                 let our_window_id = window_id_map.get(&window_id).copied().unwrap_or(0);
 
@@ -565,8 +674,12 @@ pub extern "C" fn qi_gui_run_impl() {
                     }
                     tao::event::WindowEvent::CursorMoved { position, .. } => {
                         // Call callback if registered (event_type=4, x, y)
+                        // 物理坐标 → 逻辑坐标（与上层逻辑绘制坐标一致，便于命中检测）
                         if let Some(callback) = callbacks.get(&our_window_id) {
-                            callback(our_window_id, 4, position.x as i64, position.y as i64);
+                            let sf = window_scale_map.get(&our_window_id).copied().unwrap_or(1.0);
+                            let lx = (position.x / sf) as i64;
+                            let ly = (position.y / sf) as i64;
+                            callback(our_window_id, 4, lx, ly);
                         }
                     }
                     tao::event::WindowEvent::MouseWheel { delta, .. } => {
@@ -722,7 +835,11 @@ pub extern "C" fn qi_gui_audio_is_playing_impl(audio_id: u64) -> i32 {
 
     AUDIO_PLAYERS.with(|players| {
         if let Some(player) = players.borrow().get(&audio_id) {
-            if player.is_playing() { 1 } else { 0 }
+            if player.is_playing() {
+                1
+            } else {
+                0
+            }
         } else {
             0
         }
@@ -738,7 +855,11 @@ pub extern "C" fn qi_gui_audio_is_finished_impl(audio_id: u64) -> i32 {
 
     AUDIO_PLAYERS.with(|players| {
         if let Some(player) = players.borrow().get(&audio_id) {
-            if player.is_finished() { 1 } else { 0 }
+            if player.is_finished() {
+                1
+            } else {
+                0
+            }
         } else {
             0
         }
@@ -834,7 +955,8 @@ pub extern "C" fn qi_gui_renderer_clear_impl(renderer_id: u64, r: u8, g: u8, b: 
         if let Some(state) = state.as_mut() {
             // Only queue if window is actually pending
             if state.pending_windows.iter().any(|w| w.id == window_id) {
-                state.pending_draw_commands
+                state
+                    .pending_draw_commands
                     .entry(window_id)
                     .or_insert_with(Vec::new)
                     .push(DrawCommand::Clear { r, g, b });
@@ -874,10 +996,19 @@ pub extern "C" fn qi_gui_renderer_draw_rect_impl(
         let mut state = get_gui_state();
         if let Some(state) = state.as_mut() {
             if state.pending_windows.iter().any(|w| w.id == window_id) {
-                state.pending_draw_commands
+                state
+                    .pending_draw_commands
                     .entry(window_id)
                     .or_insert_with(Vec::new)
-                    .push(DrawCommand::Rect { x, y, width, height, r, g, b });
+                    .push(DrawCommand::Rect {
+                        x,
+                        y,
+                        width,
+                        height,
+                        r,
+                        g,
+                        b,
+                    });
             }
         }
     }
@@ -920,11 +1051,39 @@ pub extern "C" fn qi_gui_renderer_draw_line_impl(
         return;
     }
 
-    RENDERERS.with(|renderers| {
+    let drawn = RENDERERS.with(|renderers| {
         if let Some(renderer) = renderers.borrow_mut().get_mut(&renderer_id) {
             renderer.draw_line(x0, y0, x1, y1, r, g, b);
+            let _ = renderer.present();
+            true
+        } else {
+            false
         }
     });
+
+    // 渲染器尚未在事件循环中创建（如 入口 中、运行 之前的绘制）→ 入队，
+    // 事件循环就绪后回放。否则这些绘制会被静默丢弃。
+    if !drawn {
+        let window_id = (renderer_id - 1) / 1000;
+        let mut state = get_gui_state();
+        if let Some(state) = state.as_mut() {
+            if state.pending_windows.iter().any(|w| w.id == window_id) {
+                state
+                    .pending_draw_commands
+                    .entry(window_id)
+                    .or_insert_with(Vec::new)
+                    .push(DrawCommand::Line {
+                        x0,
+                        y0,
+                        x1,
+                        y1,
+                        r,
+                        g,
+                        b,
+                    });
+            }
+        }
+    }
 }
 
 /// Draw a circle using midpoint circle algorithm
@@ -942,11 +1101,36 @@ pub extern "C" fn qi_gui_renderer_draw_circle_impl(
         return;
     }
 
-    RENDERERS.with(|renderers| {
+    let drawn = RENDERERS.with(|renderers| {
         if let Some(renderer) = renderers.borrow_mut().get_mut(&renderer_id) {
             renderer.draw_circle(cx, cy, radius, r, g, b);
+            let _ = renderer.present();
+            true
+        } else {
+            false
         }
     });
+
+    if !drawn {
+        let window_id = (renderer_id - 1) / 1000;
+        let mut state = get_gui_state();
+        if let Some(state) = state.as_mut() {
+            if state.pending_windows.iter().any(|w| w.id == window_id) {
+                state
+                    .pending_draw_commands
+                    .entry(window_id)
+                    .or_insert_with(Vec::new)
+                    .push(DrawCommand::Circle {
+                        cx,
+                        cy,
+                        radius,
+                        r,
+                        g,
+                        b,
+                    });
+            }
+        }
+    }
 }
 
 /// Draw an image from file
@@ -1077,10 +1261,19 @@ pub extern "C" fn qi_gui_renderer_draw_text_impl(
         let mut state = get_gui_state();
         if let Some(state) = state.as_mut() {
             if state.pending_windows.iter().any(|w| w.id == window_id) {
-                state.pending_draw_commands
+                state
+                    .pending_draw_commands
                     .entry(window_id)
                     .or_insert_with(Vec::new)
-                    .push(DrawCommand::Text { text: text_str, x, y, scale: 1, r, g, b });
+                    .push(DrawCommand::Text {
+                        text: text_str,
+                        x,
+                        y,
+                        scale: 1,
+                        r,
+                        g,
+                        b,
+                    });
             }
         }
     }
@@ -1104,15 +1297,41 @@ pub extern "C" fn qi_gui_renderer_draw_text_scaled_impl(
 
     let c_str = unsafe { CStr::from_ptr(text) };
     let text_str = match c_str.to_str() {
-        Ok(s) => s,
+        Ok(s) => s.to_string(),
         Err(_) => return,
     };
 
-    RENDERERS.with(|renderers| {
+    let drawn = RENDERERS.with(|renderers| {
         if let Some(renderer) = renderers.borrow_mut().get_mut(&renderer_id) {
-            renderer.draw_text_scaled(text_str, x, y, scale, r, g, b);
+            renderer.draw_text_scaled(&text_str, x, y, scale, r, g, b);
+            let _ = renderer.present();
+            true
+        } else {
+            false
         }
     });
+
+    if !drawn {
+        let window_id = (renderer_id - 1) / 1000;
+        let mut state = get_gui_state();
+        if let Some(state) = state.as_mut() {
+            if state.pending_windows.iter().any(|w| w.id == window_id) {
+                state
+                    .pending_draw_commands
+                    .entry(window_id)
+                    .or_insert_with(Vec::new)
+                    .push(DrawCommand::Text {
+                        text: text_str,
+                        x,
+                        y,
+                        scale,
+                        r,
+                        g,
+                        b,
+                    });
+            }
+        }
+    }
 }
 
 // ============================================================================

@@ -1,6 +1,5 @@
 /// Keyboard key code mapping module
 /// Maps Tao's keyboard keys to numeric codes for Qi language
-
 use tao::keyboard::Key;
 
 /// Map Tao keyboard key to numeric keycode
@@ -60,25 +59,25 @@ pub fn map_key_to_code(key: &Key) -> i64 {
         Key::ArrowUp => 0x26,    // Up arrow
 
         // Editing keys
-        Key::Backspace => 0x08,  // ASCII backspace
-        Key::Delete => 0x2E,     // Delete
-        Key::End => 0x23,        // End
-        Key::Enter => 0x0D,      // ASCII carriage return
-        Key::Escape => 0x1B,     // ASCII escape
-        Key::Home => 0x24,       // Home
-        Key::Insert => 0x2D,     // Insert
-        Key::PageDown => 0x22,   // Page Down
-        Key::PageUp => 0x21,     // Page Up
-        Key::Tab => 0x09,        // ASCII tab
-        Key::Space => 0x20,      // ASCII space
+        Key::Backspace => 0x08, // ASCII backspace
+        Key::Delete => 0x2E,    // Delete
+        Key::End => 0x23,       // End
+        Key::Enter => 0x0D,     // ASCII carriage return
+        Key::Escape => 0x1B,    // ASCII escape
+        Key::Home => 0x24,      // Home
+        Key::Insert => 0x2D,    // Insert
+        Key::PageDown => 0x22,  // Page Down
+        Key::PageUp => 0x21,    // Page Up
+        Key::Tab => 0x09,       // ASCII tab
+        Key::Space => 0x20,     // ASCII space
 
         // Modifier keys
-        Key::Alt => 0x12,        // Alt
-        Key::AltGraph => 0x12,   // Alt Graph (treat as Alt)
-        Key::CapsLock => 0x14,   // Caps Lock
-        Key::Control => 0x11,    // Control
-        Key::Super => 0x5B,      // Meta/Command/Windows key
-        Key::Shift => 0x10,      // Shift
+        Key::Alt => 0x12,      // Alt
+        Key::AltGraph => 0x12, // Alt Graph (treat as Alt)
+        Key::CapsLock => 0x14, // Caps Lock
+        Key::Control => 0x11,  // Control
+        Key::Super => 0x5B,    // Meta/Command/Windows key
+        Key::Shift => 0x10,    // Shift
 
         // Lock keys
         Key::NumLock => 0x90,    // Num Lock
@@ -103,11 +102,11 @@ pub fn map_key_to_code(key: &Key) -> i64 {
         Key::BrowserStop => 0xA9,
 
         // Other named keys
-        Key::Clear => 0x0C,      // Clear
+        Key::Clear => 0x0C,       // Clear
         Key::ContextMenu => 0x5D, // Context menu
-        Key::Pause => 0x13,      // Pause
+        Key::Pause => 0x13,       // Pause
         Key::PrintScreen => 0x2C, // Print Screen
-        Key::Select => 0x29,     // Select
+        Key::Select => 0x29,      // Select
 
         // Default for unhandled keys (Unidentified, Dead, etc.)
         _ => 0,

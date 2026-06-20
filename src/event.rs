@@ -1,9 +1,9 @@
 //! Event loop management module
 
-use tao::event_loop::{EventLoop as TaoEventLoop, EventLoopWindowTarget, ControlFlow};
-use tao::event::{Event, WindowEvent};
-use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use tao::event::{Event, WindowEvent};
+use tao::event_loop::{ControlFlow, EventLoop as TaoEventLoop, EventLoopWindowTarget};
 
 /// Event loop wrapper
 pub struct EventLoop {
@@ -67,7 +67,8 @@ impl EventLoop {
                 ..
             } = &event
             {
-                let window_id_u64 = unsafe { std::mem::transmute::<tao::window::WindowId, u64>(*window_id) };
+                let window_id_u64 =
+                    unsafe { std::mem::transmute::<tao::window::WindowId, u64>(*window_id) };
                 if let Some(callback) = callbacks.lock().unwrap().on_close.get_mut(&window_id_u64) {
                     callback();
                 }

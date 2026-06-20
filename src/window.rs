@@ -1,8 +1,8 @@
 //! Window management module
 
-use tao::window::{Window as TaoWindow, WindowBuilder, WindowId};
-use tao::dpi::LogicalSize;
 use std::sync::{Arc, Mutex};
+use tao::dpi::LogicalSize;
+use tao::window::{Window as TaoWindow, WindowBuilder, WindowId};
 
 /// Window wrapper
 #[derive(Clone)]
@@ -12,7 +12,12 @@ pub struct Window {
 
 impl Window {
     /// Create a new window with title and size
-    pub fn new(event_loop: &tao::event_loop::EventLoop<()>, title: &str, width: u32, height: u32) -> Result<Self, String> {
+    pub fn new(
+        event_loop: &tao::event_loop::EventLoop<()>,
+        title: &str,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, String> {
         let window = WindowBuilder::new()
             .with_title(title)
             .with_inner_size(LogicalSize::new(width, height))
@@ -56,14 +61,22 @@ impl Window {
 
     /// Get window position
     pub fn position(&self) -> (i32, i32) {
-        let pos = self.inner.lock().unwrap().outer_position().unwrap_or_default();
+        let pos = self
+            .inner
+            .lock()
+            .unwrap()
+            .outer_position()
+            .unwrap_or_default();
         (pos.x, pos.y)
     }
 
     /// Set window position
     pub fn set_position(&self, x: i32, y: i32) {
         use tao::dpi::PhysicalPosition;
-        self.inner.lock().unwrap().set_outer_position(PhysicalPosition::new(x, y));
+        self.inner
+            .lock()
+            .unwrap()
+            .set_outer_position(PhysicalPosition::new(x, y));
     }
 
     /// Get window size (inner size)
@@ -75,7 +88,10 @@ impl Window {
     /// Set window size (inner size)
     pub fn set_size(&self, width: u32, height: u32) {
         use tao::dpi::PhysicalSize;
-        self.inner.lock().unwrap().set_inner_size(PhysicalSize::new(width, height));
+        self.inner
+            .lock()
+            .unwrap()
+            .set_inner_size(PhysicalSize::new(width, height));
     }
 
     /// Get inner Tao window (for internal use)

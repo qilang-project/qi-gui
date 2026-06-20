@@ -2,7 +2,7 @@
 //!
 //! Shows how to control window position, size, and other properties.
 
-use qi_gui::{Window, EventLoop};
+use qi_gui::{EventLoop, Window};
 use std::thread;
 use std::time::Duration;
 
