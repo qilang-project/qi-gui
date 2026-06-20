@@ -9,7 +9,9 @@ use std::sync::{Arc, Mutex};
 use tao::window::Window as TaoWindow;
 use tiny_skia::{Color, LineCap, Paint, PathBuilder, Pixmap, PixmapPaint, Rect, Stroke, Transform};
 
-use cosmic_text::{Attrs, Buffer as TextBuffer, Color as TextColor, FontSystem, Metrics, Shaping, SwashCache};
+use cosmic_text::{
+    Attrs, Buffer as TextBuffer, Color as TextColor, FontSystem, Metrics, Shaping, SwashCache,
+};
 use once_cell::sync::Lazy;
 use std::sync::Mutex as StdMutex;
 
@@ -29,6 +31,9 @@ pub struct Renderer {
     // 设备像素比（retina 上为 2.0）。pixmap 是物理像素尺寸，而上层用逻辑坐标绘制，
     // 故所有绘制按此比例放大，逻辑内容才能铺满整个窗口（否则只占左上角）。
     scale: f32,
+    // 双缓冲批处理：true 时各绘制只写离屏 pixmap、不立即 present；
+    // 由 end_frame() 整帧画完后一次性 swap 到屏幕，消除清屏到重画之间的闪烁。
+    batching: bool,
 }
 
 impl Renderer {
@@ -81,7 +86,24 @@ impl Renderer {
             height: size.height,
             pixmap,
             scale: scale_factor.max(1.0),
+            batching: false,
         })
+    }
+
+    /// 开始一帧：进入批处理模式，后续绘制只写离屏 pixmap，不再每次 present。
+    pub fn begin_frame(&mut self) {
+        self.batching = true;
+    }
+
+    /// 结束一帧：退出批处理模式，把整帧一次性 present 到屏幕（双缓冲消闪）。
+    pub fn end_frame(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.batching = false;
+        self.present()
+    }
+
+    /// 是否处于批处理中（批处理时各绘制 FFI 跳过即时 present）。
+    pub fn is_batching(&self) -> bool {
+        self.batching
     }
 
     /// Resize the rendering surface

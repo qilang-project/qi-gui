@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tao::event::Event;
 use tao::event_loop::{ControlFlow, EventLoop as TaoEventLoop};
 use tao::window::WindowId;
@@ -101,6 +102,13 @@ struct GuiState {
     next_audio_id: u64,
     // Store pending draw commands: window_id -> commands
     pending_draw_commands: HashMap<u64, Vec<DrawCommand>>,
+    // 自动刷新定时器间隔（毫秒）；0=关闭。开启后事件循环每隔该间隔向各窗口
+    // 回调投递一个 event_type=6 的定时器事件（上层据此重拉数据并重绘）。
+    timer_interval_ms: u64,
+    // 渲染帧率（FPS，如 60/120）；0=关闭。开启后事件循环按该帧率向各窗口
+    // 回调投递 event_type=7 的渲染帧事件（参数1=自启动以来毫秒，参数2=帧间隔毫秒），
+    // 上层据此做逐帧动画。这是“渲染刷新”，与 timer_interval_ms 的“数据同步”相互独立。
+    frame_fps: u64,
 }
 
 impl GuiState {
@@ -115,6 +123,8 @@ impl GuiState {
             current_modifiers: tao::keyboard::ModifiersState::empty(),
             next_audio_id: 1,
             pending_draw_commands: HashMap::new(),
+            timer_interval_ms: 0,
+            frame_fps: 0,
         }
     }
 }
@@ -346,6 +356,27 @@ pub extern "C" fn qi_gui_enable_event_printing_impl(window_id: u64) {
     qi_gui_set_event_callback_impl(window_id, default_event_callback);
 }
 
+/// 设置自动刷新定时器间隔（毫秒）；0=关闭。需在 运行 之前调用。
+/// 开启后事件循环每隔该间隔向各窗口回调投递 event_type=6 的定时器事件。
+#[no_mangle]
+pub extern "C" fn qi_gui_set_timer_impl(interval_ms: u64) {
+    let mut state = get_gui_state();
+    if let Some(state) = state.as_mut() {
+        state.timer_interval_ms = interval_ms;
+    }
+}
+
+/// 设置渲染帧率（FPS，如 60/120）；0=关闭。需在 运行 之前调用。
+/// 开启后事件循环按该帧率向各窗口回调投递 event_type=7 的渲染帧事件，
+/// 参数1=自启动以来的毫秒数，参数2=每帧间隔毫秒。用于逐帧动画。
+#[no_mangle]
+pub extern "C" fn qi_gui_set_fps_impl(fps: u64) {
+    let mut state = get_gui_state();
+    if let Some(state) = state.as_mut() {
+        state.frame_fps = fps;
+    }
+}
+
 /// Get window X position
 #[no_mangle]
 pub extern "C" fn qi_gui_get_position_x_impl(window_id: u64) -> i64 {
@@ -452,18 +483,48 @@ pub extern "C" fn qi_gui_set_size_impl(window_id: u64, width: u32, height: u32) 
 #[no_mangle]
 pub extern "C" fn qi_gui_run_impl() {
     // Get pending window requests and callbacks
-    let (pending_windows, callbacks, mut pending_draw_commands, created_windows_map) = {
+    let (pending_windows, callbacks, mut pending_draw_commands, created_windows_map, timer_ms, fps) = {
         let mut state = get_gui_state();
         if let Some(state) = state.as_mut() {
             let windows = std::mem::take(&mut state.pending_windows);
             let commands = std::mem::take(&mut state.pending_draw_commands);
             let callbacks = state.event_callbacks.clone();
             let created = state.created_windows.clone();
-            (windows, callbacks, commands, created)
+            (
+                windows,
+                callbacks,
+                commands,
+                created,
+                state.timer_interval_ms,
+                state.frame_fps,
+            )
         } else {
-            (Vec::new(), HashMap::new(), HashMap::new(), HashMap::new())
+            (
+                Vec::new(),
+                HashMap::new(),
+                HashMap::new(),
+                HashMap::new(),
+                0,
+                0,
+            )
         }
     };
+    // 数据同步定时器：>0 时，事件循环用 WaitUntil 周期性唤醒并投递 event_type=6
+    let timer_interval = if timer_ms > 0 {
+        Some(Duration::from_millis(timer_ms))
+    } else {
+        None
+    };
+    let mut next_tick: Option<Instant> = timer_interval.map(|d| Instant::now() + d);
+
+    // 渲染帧循环：>0 时按帧率（微秒精度，120Hz≈8.33ms）投递 event_type=7
+    let frame_duration = if fps > 0 {
+        Some(Duration::from_micros(1_000_000 / fps))
+    } else {
+        None
+    };
+    let frame_start = Instant::now();
+    let mut next_frame: Option<Instant> = frame_duration.map(|d| frame_start + d);
 
     if pending_windows.is_empty() && created_windows_map.is_empty() {
         return;
@@ -515,7 +576,70 @@ pub extern "C" fn qi_gui_run_impl() {
 
     // Run event loop
     event_loop.run(move |event, _event_loop, control_flow| {
-        *control_flow = ControlFlow::Wait;
+        // 控制流：在数据定时器与渲染帧之间取最早的唤醒时刻；都没有则纯等待事件
+        let wake = match (next_tick, next_frame) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
+        *control_flow = match wake {
+            Some(w) => ControlFlow::WaitUntil(w),
+            None => ControlFlow::Wait,
+        };
+
+        let now = Instant::now();
+
+        // 数据同步定时器到点：向各窗口投递 event_type=6，并排下次触发
+        if let (Some(t), Some(间隔)) = (next_tick, timer_interval) {
+            if now >= t {
+                for (win, cb) in callbacks.iter() {
+                    cb(*win, 6, 0, 0);
+                }
+                // 让回调里排队/直绘的内容刷上屏
+                for window in &windows {
+                    if let Ok(guard) = window.inner().try_lock() {
+                        guard.request_redraw();
+                    }
+                }
+                next_tick = Some(now + 间隔);
+            }
+        }
+
+        // 渲染帧到点：向各窗口投递 event_type=7（参数1=自启动毫秒，参数2=帧间隔毫秒）
+        if let (Some(f), Some(帧时长)) = (next_frame, frame_duration) {
+            if now >= f {
+                let 已过毫秒 = (now - frame_start).as_millis() as i64;
+                let 帧间毫秒 = 帧时长.as_millis() as i64;
+                for (win, cb) in callbacks.iter() {
+                    cb(*win, 7, 已过毫秒, 帧间毫秒);
+                }
+                for window in &windows {
+                    if let Ok(guard) = window.inner().try_lock() {
+                        guard.request_redraw();
+                    }
+                }
+                // 跟上节奏；落后过多时重置以避免“追帧螺旋”
+                let mut nf = f + 帧时长;
+                if nf < now {
+                    nf = now + 帧时长;
+                }
+                next_frame = Some(nf);
+            }
+        }
+
+        // 唤醒/触发后重算控制流，指向更新后的最近截止时刻，避免空转一圈
+        if next_tick.is_some() || next_frame.is_some() {
+            let wake2 = match (next_tick, next_frame) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
+            if let Some(w) = wake2 {
+                *control_flow = ControlFlow::WaitUntil(w);
+            }
+        }
 
         match event {
             Event::MainEventsCleared => {
@@ -603,7 +727,9 @@ pub extern "C" fn qi_gui_run_impl() {
                                     }
                                 }
                                 // Crucial: Present the results to the surface
-                                let _ = renderer.present();
+                                if !renderer.is_batching() {
+                                    let _ = renderer.present();
+                                }
                             }
                         }
                     });
@@ -940,7 +1066,9 @@ pub extern "C" fn qi_gui_renderer_clear_impl(renderer_id: u64, r: u8, g: u8, b: 
     let drawn = RENDERERS.with(|renderers| {
         if let Some(renderer) = renderers.borrow_mut().get_mut(&renderer_id) {
             renderer.clear(r, g, b);
-            let _ = renderer.present();
+            if !renderer.is_batching() {
+                let _ = renderer.present();
+            }
             true
         } else {
             false
@@ -965,6 +1093,32 @@ pub extern "C" fn qi_gui_renderer_clear_impl(renderer_id: u64, r: u8, g: u8, b: 
     }
 }
 
+/// 开始一帧：进入批处理（双缓冲）模式，后续绘制只写离屏缓冲、不立即上屏。
+#[no_mangle]
+pub extern "C" fn qi_gui_renderer_begin_frame_impl(renderer_id: u64) {
+    if renderer_id == 0 {
+        return;
+    }
+    RENDERERS.with(|renderers| {
+        if let Some(renderer) = renderers.borrow_mut().get_mut(&renderer_id) {
+            renderer.begin_frame();
+        }
+    });
+}
+
+/// 结束一帧：把整帧一次性 present 到屏幕并退出批处理模式（消闪）。
+#[no_mangle]
+pub extern "C" fn qi_gui_renderer_end_frame_impl(renderer_id: u64) {
+    if renderer_id == 0 {
+        return;
+    }
+    RENDERERS.with(|renderers| {
+        if let Some(renderer) = renderers.borrow_mut().get_mut(&renderer_id) {
+            let _ = renderer.end_frame();
+        }
+    });
+}
+
 /// Draw a filled rectangle
 #[no_mangle]
 pub extern "C" fn qi_gui_renderer_draw_rect_impl(
@@ -984,7 +1138,9 @@ pub extern "C" fn qi_gui_renderer_draw_rect_impl(
     let drawn = RENDERERS.with(|renderers| {
         if let Some(renderer) = renderers.borrow_mut().get_mut(&renderer_id) {
             renderer.draw_rect(x, y, width, height, r, g, b);
-            let _ = renderer.present();
+            if !renderer.is_batching() {
+                let _ = renderer.present();
+            }
             true
         } else {
             false
@@ -1054,7 +1210,9 @@ pub extern "C" fn qi_gui_renderer_draw_line_impl(
     let drawn = RENDERERS.with(|renderers| {
         if let Some(renderer) = renderers.borrow_mut().get_mut(&renderer_id) {
             renderer.draw_line(x0, y0, x1, y1, r, g, b);
-            let _ = renderer.present();
+            if !renderer.is_batching() {
+                let _ = renderer.present();
+            }
             true
         } else {
             false
@@ -1104,7 +1262,9 @@ pub extern "C" fn qi_gui_renderer_draw_circle_impl(
     let drawn = RENDERERS.with(|renderers| {
         if let Some(renderer) = renderers.borrow_mut().get_mut(&renderer_id) {
             renderer.draw_circle(cx, cy, radius, r, g, b);
-            let _ = renderer.present();
+            if !renderer.is_batching() {
+                let _ = renderer.present();
+            }
             true
         } else {
             false
@@ -1249,7 +1409,9 @@ pub extern "C" fn qi_gui_renderer_draw_text_impl(
     let drawn = RENDERERS.with(|renderers| {
         if let Some(renderer) = renderers.borrow_mut().get_mut(&renderer_id) {
             renderer.draw_text(&text_str, x, y, r, g, b);
-            let _ = renderer.present();
+            if !renderer.is_batching() {
+                let _ = renderer.present();
+            }
             true
         } else {
             false
@@ -1304,7 +1466,9 @@ pub extern "C" fn qi_gui_renderer_draw_text_scaled_impl(
     let drawn = RENDERERS.with(|renderers| {
         if let Some(renderer) = renderers.borrow_mut().get_mut(&renderer_id) {
             renderer.draw_text_scaled(&text_str, x, y, scale, r, g, b);
-            let _ = renderer.present();
+            if !renderer.is_batching() {
+                let _ = renderer.present();
+            }
             true
         } else {
             false

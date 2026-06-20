@@ -73,6 +73,19 @@ void qi_gui_set_event_callback_impl(uint64_t window_id,
 void qi_gui_enable_event_printing_impl(uint64_t window_id);
 
 /**
+ * 设置自动刷新定时器间隔（毫秒）；0=关闭。需在 运行 之前调用。
+ * 开启后事件循环每隔该间隔向各窗口回调投递 event_type=6 的定时器事件。
+ */
+void qi_gui_set_timer_impl(uint64_t interval_ms);
+
+/**
+ * 设置渲染帧率（FPS，如 60/120）；0=关闭。需在 运行 之前调用。
+ * 开启后事件循环按该帧率向各窗口回调投递 event_type=7 的渲染帧事件，
+ * 参数1=自启动以来的毫秒数，参数2=每帧间隔毫秒。用于逐帧动画。
+ */
+void qi_gui_set_fps_impl(uint64_t fps);
+
+/**
  * Get window X position
  */
 int64_t qi_gui_get_position_x_impl(uint64_t window_id);
@@ -169,6 +182,16 @@ uint64_t qi_gui_renderer_create_impl(uint64_t window_id);
  * Clear the rendering surface with a color (RGB)
  */
 void qi_gui_renderer_clear_impl(uint64_t renderer_id, uint8_t r, uint8_t g, uint8_t b);
+
+/**
+ * 开始一帧：进入批处理（双缓冲）模式，后续绘制只写离屏缓冲、不立即上屏。
+ */
+void qi_gui_renderer_begin_frame_impl(uint64_t renderer_id);
+
+/**
+ * 结束一帧：把整帧一次性 present 到屏幕并退出批处理模式（消闪）。
+ */
+void qi_gui_renderer_end_frame_impl(uint64_t renderer_id);
 
 /**
  * Draw a filled rectangle
