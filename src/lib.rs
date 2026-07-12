@@ -3,6 +3,8 @@
 //! 基于 Tao 的跨平台图形化窗口库，为奇语言提供 GUI 支持
 
 pub mod audio;
+pub mod egui_app;
+pub mod egui_raster;
 pub mod event;
 pub mod ffi;
 pub mod keycode;

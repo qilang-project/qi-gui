@@ -24,6 +24,116 @@
 typedef void (*EventCallback)(uint64_t, int32_t, int64_t, int64_t);
 
 /**
+ * 创建 egui 应用窗口，返回句柄（>0 成功，0 失败）
+ */
+uint64_t qi_gui_egui_app_create_impl(const char *title, uint32_t width, uint32_t height);
+
+/**
+ * 帧开始：pump 事件 + begin_pass + 建根 Ui。返回 1=窗口存活，0=已关闭。
+ */
+int32_t qi_gui_egui_frame_begin_impl(uint64_t app_id);
+
+/**
+ * 帧结束：end_pass + tessellate + 光栅化 + present + 限帧
+ */
+void qi_gui_egui_frame_end_impl(uint64_t app_id);
+
+/**
+ * 关闭应用（销毁窗口，释放资源）
+ */
+void qi_gui_egui_app_close_impl(uint64_t app_id);
+
+/**
+ * 普通标签
+ */
+void qi_gui_egui_label_impl(const char *text);
+
+/**
+ * 大号标题
+ */
+void qi_gui_egui_heading_impl(const char *text);
+
+/**
+ * 彩色标签
+ */
+void qi_gui_egui_colored_label_impl(const char *text, int64_t r, int64_t g, int64_t b);
+
+/**
+ * 按钮：返回本帧是否被点击（1/0）
+ */
+int32_t qi_gui_egui_button_impl(const char *text);
+
+/**
+ * 单行输入框：传入当前值，返回编辑后的新值
+ */
+const char *qi_gui_egui_text_edit_impl(const char *id, const char *value);
+
+/**
+ * 多行输入框
+ */
+const char *qi_gui_egui_text_edit_multiline_impl(const char *id, const char *value);
+
+/**
+ * 整数滑条：返回新值
+ */
+int64_t qi_gui_egui_slider_impl(const char *_id, int64_t cur, int64_t min, int64_t max);
+
+/**
+ * 复选框：返回新的勾选状态（1/0）
+ */
+int32_t qi_gui_egui_checkbox_impl(const char *_id, const char *text, int32_t cur);
+
+/**
+ * 下拉选择：options 为 CSV（逗号分隔），cur 为当前序号，返回新序号
+ */
+int64_t qi_gui_egui_combo_impl(const char *id, const char *options_csv, int64_t cur);
+
+/**
+ * 分隔线
+ */
+void qi_gui_egui_separator_impl(void);
+
+/**
+ * 空行（纵向间距）
+ */
+void qi_gui_egui_space_impl(void);
+
+/**
+ * 水平布局开始
+ */
+void qi_gui_egui_horizontal_begin_impl(void);
+
+/**
+ * 水平布局结束
+ */
+void qi_gui_egui_horizontal_end_impl(void);
+
+/**
+ * 分组开始（带标题的边框容器）
+ */
+void qi_gui_egui_group_begin_impl(const char *title);
+
+/**
+ * 分组结束
+ */
+void qi_gui_egui_group_end_impl(void);
+
+/**
+ * 进度条：percent 0..100
+ */
+void qi_gui_egui_progress_impl(int64_t percent);
+
+/**
+ * 折线图：id 标识，values 为 CSV 数值，宽高（点）。用于画损失曲线等。
+ */
+void qi_gui_egui_plot_impl(const char *id, const char *values_csv, int64_t width, int64_t height);
+
+/**
+ * 消息弹窗：浮动窗口显示文本（需每帧调用以保持显示）
+ */
+void qi_gui_egui_message_impl(const char *text);
+
+/**
  * Create a window (queued until run is called)
  * Returns a window ID (non-zero on success, 0 on failure)
  */

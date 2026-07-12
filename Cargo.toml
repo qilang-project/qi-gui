@@ -31,6 +31,14 @@ tiny-skia = "0.11.4"
 # 文本排版与整形（真正的字体渲染，支持 CJK，替代手写位图字体）
 cosmic-text = "0.12"
 
+# ── egui 控件层（immediate mode GUI）──────────────────────────────
+# 新 API 家族，与老 40 个 FFI 并存。egui 应用自带 winit 后端 + softbuffer 软件
+# 呈现 + 自绘 epaint 网格光栅化（不依赖 GL/GPU，跨平台稳定）。老 tao API 不受影响。
+egui = "0.29"
+egui-winit = { version = "0.29", default-features = false }
+egui_plot = "0.29"
+winit = "0.30"
+
 [build-dependencies]
 cbindgen = "0.27"
 
