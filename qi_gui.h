@@ -9,19 +9,54 @@
 #include <stdlib.h>
 
 /**
- * Event callback function type
- * Parameters: window_id, event_type, param1, param2
- * event_type:
- *   0=CloseRequested
- *   1=Resized(width, height)
- *   2=KeyPressed(keycode, modifiers)
- *       - param1 (keycode): Key code (character codes for A-Z, 0-9 or special key codes)
- *       - param2 (modifiers): Bitmask - Bit0:Shift, Bit1:Ctrl, Bit2:Alt, Bit3:Meta/Command
- *   3=MouseClicked(button, state)
- *   4=MouseMoved(x, y)
- *   5=MouseWheel(delta_x, delta_y)
+ * 库版本（保留供 版本() 使用）
  */
-typedef void (*EventCallback)(uint64_t, int32_t, int64_t, int64_t);
+char *qi_gui_version_impl(void);
+
+/**
+ * 释放由本库返回的字符串
+ */
+void qi_gui_free_string_impl(char *s);
+
+/**
+ * 加载音频文件，返回播放器 id（>0 成功，0 失败）。支持 MP3/WAV/FLAC/Vorbis。
+ */
+uint64_t qi_gui_audio_load_impl(const char *file_path);
+
+/**
+ * 播放
+ */
+void qi_gui_audio_play_impl(uint64_t audio_id);
+
+/**
+ * 暂停
+ */
+void qi_gui_audio_pause_impl(uint64_t audio_id);
+
+/**
+ * 停止
+ */
+void qi_gui_audio_stop_impl(uint64_t audio_id);
+
+/**
+ * 设置音量（0.0..1.0）
+ */
+void qi_gui_audio_set_volume_impl(uint64_t audio_id, float volume);
+
+/**
+ * 是否正在播放（1/0）
+ */
+int32_t qi_gui_audio_is_playing_impl(uint64_t audio_id);
+
+/**
+ * 是否播放完成（1/0）
+ */
+int32_t qi_gui_audio_is_finished_impl(uint64_t audio_id);
+
+/**
+ * 释放播放器
+ */
+void qi_gui_audio_free_impl(uint64_t audio_id);
 
 /**
  * 创建 egui 应用窗口，返回句柄（>0 成功，0 失败）
@@ -42,6 +77,28 @@ void qi_gui_egui_frame_end_impl(uint64_t app_id);
  * 关闭应用（销毁窗口，释放资源）
  */
 void qi_gui_egui_app_close_impl(uint64_t app_id);
+
+/**
+ * 滚动开始(id, 高度pt)：固定高度的垂直滚动视口。内容超高时出滚动条，
+ * 滚轮悬停滚动。偏移量按 id 持久化在 egui 内存里（跨帧保持）。
+ */
+void qi_gui_egui_scroll_begin_impl(const char *id, int64_t height);
+
+/**
+ * 滚动结束：收内容高度 → 处理滚轮 → 画滚动条 → 光标推进过视口
+ */
+void qi_gui_egui_scroll_end_impl(void);
+
+/**
+ * 折叠开始(标题)：可点开合的分区头。返回 1=展开（子控件会显示）/ 0=收起。
+ * 收起时调用方照常写子控件调用也无妨（会落到父 Ui），但推荐用返回值跳过。
+ */
+int32_t qi_gui_egui_collapse_begin_impl(const char *title);
+
+/**
+ * 折叠结束：与 折叠开始 配对；展开时弹出子 Ui 并推进父光标
+ */
+void qi_gui_egui_collapse_end_impl(void);
 
 /**
  * 普通标签
@@ -134,270 +191,148 @@ void qi_gui_egui_plot_impl(const char *id, const char *values_csv, int64_t width
 void qi_gui_egui_message_impl(const char *text);
 
 /**
- * Create a window (queued until run is called)
- * Returns a window ID (non-zero on success, 0 on failure)
+ * 画布开始(id, 宽, 高)：在当前 Ui 占一块定尺寸自绘区。id 目前仅作语义标注。
  */
-uint64_t qi_gui_create_window_impl(const char *title, uint32_t width, uint32_t height);
+void qi_gui_egui_canvas_begin_impl(const char *_id,
+                                   int64_t width,
+                                   int64_t height);
 
 /**
- * Destroy a window (currently a no-op in lazy mode)
+ * 画布结束()
  */
-void qi_gui_destroy_window_impl(uint64_t window_id);
+void qi_gui_egui_canvas_end_impl(void);
 
 /**
- * Set window title (updates queued window or title map)
+ * 画布矩形(x, y, 宽, 高, r, g, b)：填充矩形，坐标为画布局部坐标
  */
-void qi_gui_set_title_impl(uint64_t window_id, const char *title);
+void qi_gui_egui_canvas_rect_impl(int64_t x,
+                                  int64_t y,
+                                  int64_t w,
+                                  int64_t h,
+                                  int64_t r,
+                                  int64_t g,
+                                  int64_t b);
 
 /**
- * Get window title
+ * 画布圆(x, y, 半径, r, g, b)：填充圆，(x,y) 为圆心的画布局部坐标
  */
-char *qi_gui_get_title_impl(uint64_t window_id);
+void qi_gui_egui_canvas_circle_impl(int64_t x,
+                                    int64_t y,
+                                    int64_t radius,
+                                    int64_t r,
+                                    int64_t g,
+                                    int64_t b);
 
 /**
- * Show window (no-op in current implementation)
+ * 画布线(x1, y1, x2, y2, 粗, r, g, b)：线段，端点为画布局部坐标
  */
-void qi_gui_show_window_impl(uint64_t _window_id);
+void qi_gui_egui_canvas_line_impl(int64_t x1,
+                                  int64_t y1,
+                                  int64_t x2,
+                                  int64_t y2,
+                                  int64_t width,
+                                  int64_t r,
+                                  int64_t g,
+                                  int64_t b);
 
 /**
- * Hide window (no-op in current implementation)
+ * 画布文本(x, y, 文本, 字号, r, g, b)：左上对齐绘制文本，(x,y) 为局部坐标
  */
-void qi_gui_hide_window_impl(uint64_t _window_id);
+void qi_gui_egui_canvas_text_impl(int64_t x,
+                                  int64_t y,
+                                  const char *text,
+                                  int64_t size,
+                                  int64_t r,
+                                  int64_t g,
+                                  int64_t b);
 
 /**
- * Check if window is visible
+ * 画布点击() → 整数：本帧画布是否被点击（1/0）
  */
-int32_t qi_gui_is_visible_impl(uint64_t window_id);
+int64_t qi_gui_egui_canvas_clicked_impl(void);
 
 /**
- * Set event callback for a window
- * callback signature: fn(window_id: u64, event_type: i32, param1: i64, param2: i64)
- * event_type: 0=CloseRequested, 1=Resized(width, height), 2=KeyPressed(keycode), 3=MouseClicked(x, y)
+ * 画布鼠标X() → 整数：鼠标在画布内的局部 X（无悬停返回 -1）
  */
-void qi_gui_set_event_callback_impl(uint64_t window_id,
-                                    EventCallback callback);
+int64_t qi_gui_egui_canvas_mouse_x_impl(void);
 
 /**
- * Enable default event printing for a window (prints events to console)
+ * 画布鼠标Y() → 整数：鼠标在画布内的局部 Y（无悬停返回 -1）
  */
-void qi_gui_enable_event_printing_impl(uint64_t window_id);
+int64_t qi_gui_egui_canvas_mouse_y_impl(void);
 
 /**
- * 设置自动刷新定时器间隔（毫秒）；0=关闭。需在 运行 之前调用。
- * 开启后事件循环每隔该间隔向各窗口回调投递 event_type=6 的定时器事件。
+ * 单选按钮：selected=当前是否选中，返回 1=本帧被点击（调用方据此切换组内序号）
  */
-void qi_gui_set_timer_impl(uint64_t interval_ms);
+int32_t qi_gui_egui_radio_impl(const char *text,
+                               int32_t selected);
 
 /**
- * 设置渲染帧率（FPS，如 60/120）；0=关闭。需在 运行 之前调用。
- * 开启后事件循环按该帧率向各窗口回调投递 event_type=7 的渲染帧事件，
- * 参数1=自启动以来的毫秒数，参数2=每帧间隔毫秒。用于逐帧动画。
+ * 可选中列表项（整行高亮）：返回 1=本帧被点击
  */
-void qi_gui_set_fps_impl(uint64_t fps);
+int32_t qi_gui_egui_selectable_impl(const char *text, int32_t selected);
 
 /**
- * Get window X position
+ * 数字输入（拖拽/双击编辑的整数框）：返回新值
  */
-int64_t qi_gui_get_position_x_impl(uint64_t window_id);
+int64_t qi_gui_egui_drag_value_impl(const char *_id, int64_t cur);
 
 /**
- * Get window Y position
+ * 浮点滑条：返回新值
  */
-int64_t qi_gui_get_position_y_impl(uint64_t window_id);
+double qi_gui_egui_slider_f64_impl(const char *_id, double cur, double min, double max);
 
 /**
- * Set window position
+ * 超链接：点击用系统浏览器打开（经 egui-winit 的 open_url 平台输出）
  */
-void qi_gui_set_position_impl(uint64_t window_id, int32_t x, int32_t y);
+void qi_gui_egui_hyperlink_impl(const char *text, const char *url);
 
 /**
- * Get window width
+ * 带悬浮提示的标签：鼠标悬停显示气泡
  */
-int64_t qi_gui_get_width_impl(uint64_t window_id);
+void qi_gui_egui_label_tip_impl(const char *text, const char *tip);
 
 /**
- * Get window height
+ * 只读表格：表头 CSV（逗号分列），数据行以 '\n' 分行、逗号分列。斑马纹。
  */
-int64_t qi_gui_get_height_impl(uint64_t window_id);
+void qi_gui_egui_table_impl(const char *id,
+                            const char *headers_csv,
+                            const char *rows_data);
 
 /**
- * Set window size
+ * 柱状图：values 为 CSV 数值；宽高（点，0=自适应）
  */
-void qi_gui_set_size_impl(uint64_t window_id, uint32_t width, uint32_t height);
+void qi_gui_egui_bar_chart_impl(const char *id,
+                                const char *values_csv,
+                                int64_t width,
+                                int64_t height);
 
 /**
- * Run the event loop (creates all pending windows and starts event processing)
+ * 图片显示(路径, 宽, 高)：首次加载解码并缓存为纹理（png/jpg 等），之后直接画。
+ * 宽/高传 0 = 用图片原始尺寸。加载失败画一行错误标签（不崩）。
  */
-void qi_gui_run_impl(void);
+void qi_gui_egui_image_impl(const char *path,
+                            int64_t width,
+                            int64_t height);
 
 /**
- * Free a string allocated by this library
+ * 设置主题：1=深色，0=浅色。任意时刻可调（含帧内）。
  */
-void qi_gui_free_string_impl(char *s);
+void qi_gui_egui_set_theme_impl(int32_t dark);
 
 /**
- * Get library version
+ * 界面缩放：百分比（100=原始，125=放大 1.25 倍…），夹在 50..300
  */
-char *qi_gui_version_impl(void);
+void qi_gui_egui_set_zoom_impl(int64_t percent);
 
 /**
- * Load an audio file and create a player
- * Returns audio player ID (> 0) on success, 0 on failure
- * Supports: MP3, WAV, FLAC, Vorbis
+ * 设置窗口标题（运行中随时改）
  */
-uint64_t qi_gui_audio_load_impl(const char *file_path);
+void qi_gui_egui_window_title_impl(uint64_t app_id, const char *title);
 
 /**
- * Play audio
+ * 供 Qi 侧探测本批控件是否可用（返回批次号）
  */
-void qi_gui_audio_play_impl(uint64_t audio_id);
-
-/**
- * Pause audio
- */
-void qi_gui_audio_pause_impl(uint64_t audio_id);
-
-/**
- * Stop audio
- */
-void qi_gui_audio_stop_impl(uint64_t audio_id);
-
-/**
- * Set audio volume (0.0 to 1.0)
- */
-void qi_gui_audio_set_volume_impl(uint64_t audio_id, float volume);
-
-/**
- * Check if audio is playing (returns 1 if playing, 0 if not)
- */
-int32_t qi_gui_audio_is_playing_impl(uint64_t audio_id);
-
-/**
- * Check if audio is finished (returns 1 if finished, 0 if not)
- */
-int32_t qi_gui_audio_is_finished_impl(uint64_t audio_id);
-
-/**
- * Free/release an audio player
- */
-void qi_gui_audio_free_impl(uint64_t audio_id);
-
-/**
- * Create a renderer for a window
- * Returns renderer ID (> 0) on success, 0 on failure
- */
-uint64_t qi_gui_renderer_create_impl(uint64_t window_id);
-
-/**
- * Clear the rendering surface with a color (RGB)
- */
-void qi_gui_renderer_clear_impl(uint64_t renderer_id, uint8_t r, uint8_t g, uint8_t b);
-
-/**
- * 开始一帧：进入批处理（双缓冲）模式，后续绘制只写离屏缓冲、不立即上屏。
- */
-void qi_gui_renderer_begin_frame_impl(uint64_t renderer_id);
-
-/**
- * 结束一帧：把整帧一次性 present 到屏幕并退出批处理模式（消闪）。
- */
-void qi_gui_renderer_end_frame_impl(uint64_t renderer_id);
-
-/**
- * Draw a filled rectangle
- */
-void qi_gui_renderer_draw_rect_impl(uint64_t renderer_id,
-                                    uint32_t x,
-                                    uint32_t y,
-                                    uint32_t width,
-                                    uint32_t height,
-                                    uint8_t r,
-                                    uint8_t g,
-                                    uint8_t b);
-
-/**
- * Draw a single pixel
- */
-void qi_gui_renderer_draw_pixel_impl(uint64_t renderer_id,
-                                     uint32_t x,
-                                     uint32_t y,
-                                     uint8_t r,
-                                     uint8_t g,
-                                     uint8_t b);
-
-/**
- * Draw a line using Bresenham algorithm
- */
-void qi_gui_renderer_draw_line_impl(uint64_t renderer_id,
-                                    int32_t x0,
-                                    int32_t y0,
-                                    int32_t x1,
-                                    int32_t y1,
-                                    uint8_t r,
-                                    uint8_t g,
-                                    uint8_t b);
-
-/**
- * Draw a circle using midpoint circle algorithm
- */
-void qi_gui_renderer_draw_circle_impl(uint64_t renderer_id,
-                                      int32_t cx,
-                                      int32_t cy,
-                                      uint32_t radius,
-                                      uint8_t r,
-                                      uint8_t g,
-                                      uint8_t b);
-
-/**
- * Draw an image from file
- * Returns 0 on success, non-zero on error
- */
-int32_t qi_gui_renderer_draw_image_impl(uint64_t renderer_id,
-                                        const char *file_path,
-                                        uint32_t x,
-                                        uint32_t y);
-
-/**
- * Resize the renderer surface
- */
-void qi_gui_renderer_resize_impl(uint64_t renderer_id, uint32_t width, uint32_t height);
-
-/**
- * Get renderer width
- */
-uint32_t qi_gui_renderer_get_width_impl(uint64_t renderer_id);
-
-/**
- * Get renderer height
- */
-uint32_t qi_gui_renderer_get_height_impl(uint64_t renderer_id);
-
-/**
- * Free/release a renderer
- */
-void qi_gui_renderer_free_impl(uint64_t renderer_id);
-
-/**
- * Draw text at a position with a color
- */
-void qi_gui_renderer_draw_text_impl(uint64_t renderer_id,
-                                    const char *text,
-                                    int32_t x,
-                                    int32_t y,
-                                    uint8_t r,
-                                    uint8_t g,
-                                    uint8_t b);
-
-/**
- * Draw text with custom scale
- */
-void qi_gui_renderer_draw_text_scaled_impl(uint64_t renderer_id,
-                                           const char *text,
-                                           int32_t x,
-                                           int32_t y,
-                                           uint32_t scale,
-                                           uint8_t r,
-                                           uint8_t g,
-                                           uint8_t b);
+int64_t qi_gui_egui_widgets2_version_impl(void);
 
 #endif  /* QI_GUI_H */

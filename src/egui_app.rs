@@ -1,8 +1,8 @@
 //! egui 控件层 —— immediate mode GUI，由 qilang 主循环驱动
 //!
 //! ## 架构
-//! - **窗口后端**：winit 0.30（`pump_app_events` 非阻塞逐帧抽事件）。与老 tao API
-//!   并存——一个 Qi 程序用其一，互不干扰。
+//! - **窗口后端**：winit 0.30（`pump_app_events` 非阻塞逐帧抽事件）。qi-gui 唯一
+//!   窗口栈（老 tao 自绘轨已于 2026-07-18 移除，图元能力由画布层承接）。
 //! - **呈现**：softbuffer 软件帧缓冲 + `egui_raster` 自绘 epaint 网格（无 GL/GPU）。
 //! - **主循环**：qilang 侧 `当(帧开始(句柄)){ ...控件... 帧结束(句柄) }`。
 //!     - `帧开始`：pump 事件 → `ctx.begin_pass` → 建根 `Ui` 压栈 → 返回窗口是否存活。
@@ -144,6 +144,27 @@ struct FrameCtx {
     ctx: egui::Context,
     ppp: f32,
     ui_stack: Vec<*mut egui::Ui>,
+    /// begin/end 式容器（滚动区/折叠区）的配对元数据栈
+    containers: Vec<Container>,
+}
+
+/// begin/end 容器元数据：end 时据此收尾（滚动条绘制/光标推进/是否需弹 Ui）
+enum Container {
+    /// 滚动区：id 用于在 egui 内存里持久化滚动偏移，viewport 是可视窗口
+    Scroll { id: Id, viewport: egui::Rect },
+    /// 折叠区：展开时压了子 Ui（收起时没压，end 不弹）
+    Collapse { pushed: bool },
+    /// 画布：定尺寸自绘区。painter 承接老图元能力（矩形/圆/线/文本），
+    /// offset 是画布左上角全局坐标（局部坐标 + offset = 全局），
+    /// response 存点击/悬停查询。allocate_painter 已占位并推进父光标，故 end 只弹元数据。
+    Canvas(CanvasCtx),
+}
+
+/// 画布上下文：绘制 FFI 从这里取 painter，查询 FFI 从这里读 response
+pub(crate) struct CanvasCtx {
+    pub painter: egui::Painter,
+    pub offset: egui::Pos2,
+    pub response: egui::Response,
 }
 
 thread_local! {
@@ -155,7 +176,7 @@ thread_local! {
     static RET_BUF: RefCell<Option<CString>> = const { RefCell::new(None) };
 }
 
-fn ret_str(s: String) -> *const c_char {
+pub(crate) fn ret_str(s: String) -> *const c_char {
     RET_BUF.with(|b| {
         let c = CString::new(s).unwrap_or_default();
         let ptr = c.as_ptr();
@@ -164,7 +185,7 @@ fn ret_str(s: String) -> *const c_char {
     })
 }
 
-fn cstr(p: *const c_char) -> String {
+pub(crate) fn cstr(p: *const c_char) -> String {
     if p.is_null() {
         return String::new();
     }
@@ -330,6 +351,7 @@ pub extern "C" fn qi_gui_egui_frame_begin_impl(app_id: u64) -> i32 {
                 ctx,
                 ppp,
                 ui_stack: vec![root_ptr],
+                containers: Vec::new(),
             });
         });
         1
@@ -400,6 +422,17 @@ pub extern "C" fn qi_gui_egui_frame_end_impl(app_id: u64) {
     });
 }
 
+/// 改窗口标题（供 egui_widgets2 的 设置窗口标题 用）
+pub(crate) fn set_window_title(app_id: u64, title: &str) {
+    APPS.with(|a| {
+        if let Some(app) = a.borrow().get(&app_id) {
+            if let Some(w) = &app.handler.window {
+                w.set_title(title);
+            }
+        }
+    });
+}
+
 /// 关闭应用（销毁窗口，释放资源）
 #[no_mangle]
 pub extern "C" fn qi_gui_egui_app_close_impl(app_id: u64) {
@@ -413,7 +446,7 @@ pub extern "C" fn qi_gui_egui_app_close_impl(app_id: u64) {
 // 帧内 Ui 栈辅助
 // ============================================================================
 
-fn with_top_ui<R>(f: impl FnOnce(&mut egui::Ui) -> R) -> Option<R> {
+pub(crate) fn with_top_ui<R>(f: impl FnOnce(&mut egui::Ui) -> R) -> Option<R> {
     FRAME.with(|fr| {
         let b = fr.borrow();
         let frame = b.as_ref()?;
@@ -422,11 +455,68 @@ fn with_top_ui<R>(f: impl FnOnce(&mut egui::Ui) -> R) -> Option<R> {
     })
 }
 
-fn with_ctx<R>(f: impl FnOnce(&egui::Context) -> R) -> Option<R> {
+pub(crate) fn with_ctx<R>(f: impl FnOnce(&egui::Context) -> R) -> Option<R> {
     FRAME.with(|fr| {
         let b = fr.borrow();
         let frame = b.as_ref()?;
         Some(f(&frame.ctx))
+    })
+}
+
+// ============================================================================
+// 画布容器辅助（供 egui_canvas.rs 的 FFI 调用）
+// ============================================================================
+
+/// 画布开始：在当前 Ui 顶上分配一块定尺寸自绘区，painter/response 压入容器栈。
+/// allocate_painter 会占位并推进父光标，因此结束时无需再手动推进。
+pub(crate) fn canvas_begin(width: f32, height: f32) {
+    FRAME.with(|fr| {
+        let mut b = fr.borrow_mut();
+        let Some(frame) = b.as_mut() else {
+            return;
+        };
+        let Some(&parent_ptr) = frame.ui_stack.last() else {
+            return;
+        };
+        let parent = unsafe { &mut *parent_ptr };
+        let (response, mut painter) =
+            parent.allocate_painter(vec2(width.max(1.0), height.max(1.0)), egui::Sense::click());
+        let offset = response.rect.min;
+        // 裁剪到画布矩形：越界图元不画
+        painter.set_clip_rect(response.rect.intersect(parent.clip_rect()));
+        frame.containers.push(Container::Canvas(CanvasCtx {
+            painter,
+            offset,
+            response,
+        }));
+    });
+}
+
+/// 画布结束：弹出画布容器元数据（占位已在 begin 完成）
+pub(crate) fn canvas_end() {
+    FRAME.with(|fr| {
+        let mut b = fr.borrow_mut();
+        let Some(frame) = b.as_mut() else {
+            return;
+        };
+        // 只在栈顶确实是画布时弹，避免配对错乱破坏别的容器
+        if matches!(frame.containers.last(), Some(Container::Canvas(_))) {
+            frame.containers.pop();
+        }
+    });
+}
+
+/// 取栈顶画布上下文（从后往前找最近的 Canvas），供绘制/查询 FFI 使用
+pub(crate) fn with_top_canvas<R>(f: impl FnOnce(&CanvasCtx) -> R) -> Option<R> {
+    FRAME.with(|fr| {
+        let b = fr.borrow();
+        let frame = b.as_ref()?;
+        for c in frame.containers.iter().rev() {
+            if let Container::Canvas(cc) = c {
+                return Some(f(cc));
+            }
+        }
+        None
     })
 }
 
@@ -486,6 +576,170 @@ fn pop_layout(draw_frame: bool) {
             parent.advance_cursor_after_rect(rect);
         }
     });
+}
+
+// ============================================================================
+// FFI —— 容器：滚动区 / 折叠区（begin/end 配对，元数据走 containers 栈）
+// ============================================================================
+
+/// 滚动开始(id, 高度pt)：固定高度的垂直滚动视口。内容超高时出滚动条，
+/// 滚轮悬停滚动。偏移量按 id 持久化在 egui 内存里（跨帧保持）。
+#[no_mangle]
+pub extern "C" fn qi_gui_egui_scroll_begin_impl(id: *const c_char, height: i64) {
+    let sid = Id::new(("qi_scroll", cstr(id)));
+    FRAME.with(|fr| {
+        let mut b = fr.borrow_mut();
+        let Some(frame) = b.as_mut() else {
+            return;
+        };
+        let Some(&parent_ptr) = frame.ui_stack.last() else {
+            return;
+        };
+        let parent = unsafe { &mut *parent_ptr };
+        let offset: f32 = parent
+            .ctx()
+            .data_mut(|d| *d.get_persisted_mut_or(sid, 0.0f32));
+        let avail = parent.available_rect_before_wrap();
+        let h = (height.max(40) as f32).min(avail.height().max(40.0));
+        let viewport = egui::Rect::from_min_size(avail.min, vec2(avail.width(), h));
+        // 内容 Ui：从视口顶上移 offset 起排，右侧留 14pt 滚道；高度无限（由内容撑）
+        let content_rect = egui::Rect::from_min_size(
+            viewport.min - vec2(0.0, offset),
+            vec2((viewport.width() - 14.0).max(20.0), f32::INFINITY),
+        );
+        let mut child = parent.new_child(
+            UiBuilder::new()
+                .max_rect(content_rect)
+                .layout(Layout::top_down(Align::Min)),
+        );
+        // 裁剪到视口：视口外的内容不画（光栅器按 clip_rect 裁）
+        child.set_clip_rect(viewport.intersect(parent.clip_rect()));
+        frame.ui_stack.push(Box::into_raw(Box::new(child)));
+        frame
+            .containers
+            .push(Container::Scroll { id: sid, viewport });
+    });
+}
+
+/// 滚动结束：收内容高度 → 处理滚轮 → 画滚动条 → 光标推进过视口
+#[no_mangle]
+pub extern "C" fn qi_gui_egui_scroll_end_impl() {
+    FRAME.with(|fr| {
+        let mut b = fr.borrow_mut();
+        let Some(frame) = b.as_mut() else {
+            return;
+        };
+        let Some(Container::Scroll { id, viewport }) = frame.containers.pop() else {
+            return; // 配对错乱：忽略（不弹 Ui，避免把别的容器弄塌）
+        };
+        if frame.ui_stack.len() <= 1 {
+            return;
+        }
+        let child = unsafe { Box::from_raw(frame.ui_stack.pop().unwrap()) };
+        let content_h = child.min_rect().height();
+        drop(child);
+        let parent = unsafe { &mut **frame.ui_stack.last().unwrap() };
+
+        // 滚轮（悬停视口时生效）；偏移夹在 [0, 内容高-视口高]
+        let mut offset: f32 = parent
+            .ctx()
+            .data_mut(|d| *d.get_persisted_mut_or(id, 0.0f32));
+        if parent.rect_contains_pointer(viewport) {
+            let dy = parent.ctx().input(|i| i.smooth_scroll_delta.y);
+            offset -= dy;
+        }
+        let max_off = (content_h - viewport.height()).max(0.0);
+        offset = offset.clamp(0.0, max_off);
+        parent.ctx().data_mut(|d| d.insert_persisted(id, offset));
+
+        // 滚动条：右缘 6pt 滑道 + 按比例的滑块
+        if max_off > 0.0 {
+            let track = egui::Rect::from_min_max(
+                egui::pos2(viewport.max.x - 8.0, viewport.min.y + 2.0),
+                egui::pos2(viewport.max.x - 2.0, viewport.max.y - 2.0),
+            );
+            let track_h = track.height();
+            let thumb_h = (viewport.height() / content_h * track_h).max(24.0);
+            let thumb_y = track.min.y + (offset / max_off) * (track_h - thumb_h);
+            let thumb = egui::Rect::from_min_size(
+                egui::pos2(track.min.x, thumb_y),
+                vec2(track.width(), thumb_h),
+            );
+            let weak = parent.visuals().widgets.noninteractive.bg_fill;
+            let strong = parent.visuals().widgets.inactive.fg_stroke.color;
+            parent.painter().rect_filled(track, 3.0, weak);
+            parent.painter().rect_filled(thumb, 3.0, strong);
+        }
+        parent.advance_cursor_after_rect(viewport);
+    });
+}
+
+/// 折叠开始(标题)：可点开合的分区头。返回 1=展开（子控件会显示）/ 0=收起。
+/// 收起时调用方照常写子控件调用也无妨（会落到父 Ui），但推荐用返回值跳过。
+#[no_mangle]
+pub extern "C" fn qi_gui_egui_collapse_begin_impl(title: *const c_char) -> i32 {
+    let t = cstr(title);
+    let cid = Id::new(("qi_collapse", &t));
+    let mut open_now = false;
+    FRAME.with(|fr| {
+        let mut b = fr.borrow_mut();
+        let Some(frame) = b.as_mut() else {
+            return;
+        };
+        let Some(&parent_ptr) = frame.ui_stack.last() else {
+            return;
+        };
+        let parent = unsafe { &mut *parent_ptr };
+        let mut open: bool = parent
+            .ctx()
+            .data_mut(|d| *d.get_persisted_mut_or(cid, false));
+        let arrow = if open { "▼" } else { "▶" };
+        if parent
+            .selectable_label(false, format!("{arrow} {t}"))
+            .clicked()
+        {
+            open = !open;
+            parent.ctx().data_mut(|d| d.insert_persisted(cid, open));
+        }
+        if open {
+            // 展开：压缩进 12pt 的纵向子 Ui（与 push_layout(false, 12.0) 同构，
+            // 就地实现避免嵌套借用 FRAME）
+            let avail = parent.available_rect_before_wrap();
+            let mut rect = avail;
+            rect.min.x += 12.0;
+            let child = parent.new_child(
+                UiBuilder::new()
+                    .max_rect(rect)
+                    .layout(Layout::top_down(Align::Min)),
+            );
+            frame.ui_stack.push(Box::into_raw(Box::new(child)));
+        }
+        frame.containers.push(Container::Collapse { pushed: open });
+        open_now = open;
+    });
+    if open_now {
+        1
+    } else {
+        0
+    }
+}
+
+/// 折叠结束：与 折叠开始 配对；展开时弹出子 Ui 并推进父光标
+#[no_mangle]
+pub extern "C" fn qi_gui_egui_collapse_end_impl() {
+    let need_pop = FRAME.with(|fr| {
+        let mut b = fr.borrow_mut();
+        let Some(frame) = b.as_mut() else {
+            return false;
+        };
+        match frame.containers.pop() {
+            Some(Container::Collapse { pushed }) => pushed,
+            _ => false,
+        }
+    });
+    if need_pop {
+        pop_layout(false);
+    }
 }
 
 // ============================================================================
