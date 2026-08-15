@@ -275,6 +275,8 @@ int64_t qi_gui_egui_key_pressed_impl(const char *name);
  * 任意键刚按() → 1/0：本帧有任何键刚按下（"按任意键开始"）
  */
 int64_t qi_gui_egui_any_key_pressed_impl(void);
+
+/**
  * 画布图片(路径, x, y, 宽, 高)：左上角对齐，拉伸到给定宽高。
  * 宽或高传 <=0 时按图片原始尺寸的比例补齐；两个都 <=0 就用原始尺寸。
  */
