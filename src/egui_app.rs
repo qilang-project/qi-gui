@@ -137,6 +137,35 @@ struct EguiApp {
     textures: TextureStore,
     last_frame: Instant,
     alive: bool,
+    /// 帧循环起始时刻（**第一次 `帧开始` 时才置位**），配合 `autoclose` 做自动关窗。
+    /// 为什么不用"应用创建时刻"：`应用创建` 自己就要花掉一大截时间 —— 建事件循环、
+    /// 泵到窗口真正出来、读系统 CJK 字体（PingFang.ttc 是几十 MB）、建字体图集，
+    /// macOS 上实测 2.4 秒左右。从创建时刻计时的话，`QI_GUI_AUTOCLOSE_MS=2000`
+    /// 会**一帧都没渲染就退出**，而程序照样打印"窗口已关闭"、退出码 0 ——
+    /// 一条什么都没验到的假绿。从第一帧起算，语义就是干脆的"帧循环跑 N 毫秒"。
+    loop_start: Option<Instant>,
+    /// 自动关窗时限。来自环境变量 `QI_GUI_AUTOCLOSE_MS`，未设为 None（零行为变化）。
+    autoclose: Option<Duration>,
+}
+
+/// 读测试钩子 `QI_GUI_AUTOCLOSE_MS`。
+///
+/// **为什么需要它**：GUI 的自动化验收有个死结 —— 程序开了窗就等用户去关，
+/// CI 里没有用户，脚本只能挂死或者被 timeout 杀掉（拿不到干净的退出码）。
+/// 设了这个变量后，`帧开始` 在**帧循环**跑满该毫秒数时返回 0，效果**等同于用户关窗**：
+/// qi 侧 `当(帧开始(应用))` 循环正常结束，走完 `关闭应用` 后正常退出，退出码 0。
+/// 计时从第一次 `帧开始` 起算（不含窗口/字体的启动开销，理由见 `loop_start`）。
+///
+/// 不设时完全不生效，正常使用零影响。CI 与后续所有 GUI 自动化都靠这个钩子。
+fn read_autoclose() -> Option<Duration> {
+    let raw = std::env::var("QI_GUI_AUTOCLOSE_MS").ok()?;
+    match raw.trim().parse::<u64>() {
+        Ok(ms) => Some(Duration::from_millis(ms)),
+        Err(_) => {
+            eprintln!("egui: QI_GUI_AUTOCLOSE_MS 不是合法毫秒数「{raw}」，忽略。");
+            None
+        }
+    }
 }
 
 /// 当前帧上下文：控件 FFI 从这里取 Ui 栈顶
@@ -269,6 +298,8 @@ pub extern "C" fn qi_gui_egui_app_create_impl(
         textures: TextureStore::new(),
         last_frame: Instant::now(),
         alive: true,
+        loop_start: None,
+        autoclose: read_autoclose(),
     };
 
     // 泵事件直到窗口创建（resumed 触发）
@@ -309,6 +340,15 @@ pub extern "C" fn qi_gui_egui_frame_begin_impl(app_id: u64) -> i32 {
             return 0;
         }
 
+        // 测试钩子：帧循环跑满时限就假装用户关了窗（详见 read_autoclose 的注释）
+        if let Some(limit) = app.autoclose {
+            let started = *app.loop_start.get_or_insert_with(Instant::now);
+            if started.elapsed() >= limit {
+                app.alive = false;
+                return 0;
+            }
+        }
+
         // 非阻塞抽干事件
         let status = app
             .event_loop
@@ -331,6 +371,8 @@ pub extern "C" fn qi_gui_egui_frame_begin_impl(app_id: u64) -> i32 {
         let raw_input = state.take_egui_input(&window);
         let ctx = app.handler.egui_ctx.clone();
         ctx.begin_pass(raw_input);
+        // 抓这一帧的键盘快照（必须在 begin_pass 之后，那时 InputState 才是本帧的）
+        crate::egui_keyboard::capture(&ctx);
         let ppp = ctx.pixels_per_point();
 
         // 建根 Ui：占满可用区域，留 10pt 边距，纵向布局

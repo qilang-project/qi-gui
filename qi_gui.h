@@ -262,6 +262,21 @@ int64_t qi_gui_egui_canvas_mouse_x_impl(void);
 int64_t qi_gui_egui_canvas_mouse_y_impl(void);
 
 /**
+ * 按键按住(键名) → 1/0：这一帧该键是否处于按下状态（持续触发，适合移动）
+ */
+int64_t qi_gui_egui_key_down_impl(const char *name);
+
+/**
+ * 按键刚按(键名) → 1/0：这一帧刚按下的边沿（适合跳跃 / 开火 / 切换）
+ */
+int64_t qi_gui_egui_key_pressed_impl(const char *name);
+
+/**
+ * 任意键刚按() → 1/0：本帧有任何键刚按下（"按任意键开始"）
+ */
+int64_t qi_gui_egui_any_key_pressed_impl(void);
+
+/**
  * 单选按钮：selected=当前是否选中，返回 1=本帧被点击（调用方据此切换组内序号）
  */
 int32_t qi_gui_egui_radio_impl(const char *text,
