@@ -9,4 +9,5 @@ pub mod audio_ffi;
 pub mod egui_app;
 pub mod egui_canvas;
 pub mod egui_raster;
+pub mod egui_sprite;
 pub mod egui_widgets2;

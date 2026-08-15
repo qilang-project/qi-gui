@@ -262,6 +262,53 @@ int64_t qi_gui_egui_canvas_mouse_x_impl(void);
 int64_t qi_gui_egui_canvas_mouse_y_impl(void);
 
 /**
+ * 画布图片(路径, x, y, 宽, 高)：左上角对齐，拉伸到给定宽高。
+ * 宽或高传 <=0 时按图片原始尺寸的比例补齐；两个都 <=0 就用原始尺寸。
+ */
+void qi_gui_egui_canvas_image_impl(const char *path,
+                                   int64_t x,
+                                   int64_t y,
+                                   int64_t width,
+                                   int64_t height);
+
+/**
+ * 画布图片旋转(路径, 中心x, 中心y, 宽, 高, 角度)：绕**中心**旋转，角度制，正数顺时针。
+ * 做转向的小车 / 朝鼠标的飞机就用它。
+ */
+void qi_gui_egui_canvas_image_rotated_impl(const char *path,
+                                           int64_t cx,
+                                           int64_t cy,
+                                           int64_t width,
+                                           int64_t height,
+                                           int64_t degrees);
+
+/**
+ * 画布图片翻转(路径, x, y, 宽, 高, 水平翻)：水平翻 != 0 时左右镜像。
+ * 角色向左走时翻一下，就不用为左右各画一张图。
+ */
+void qi_gui_egui_canvas_image_flipped_impl(const char *path,
+                                           int64_t x,
+                                           int64_t y,
+                                           int64_t width,
+                                           int64_t height,
+                                           int64_t flip_h);
+
+/**
+ * 图片宽(路径) → 整数：原始像素宽。读不到返回 0（等比缩放前先判一下就不会除零）。
+ */
+int64_t qi_gui_egui_image_width_impl(const char *path);
+
+/**
+ * 图片高(路径) → 整数：原始像素高。读不到返回 0。
+ */
+int64_t qi_gui_egui_image_height_impl(const char *path);
+
+/**
+ * 供 Qi 侧探测精灵层是否可用（返回批次号）
+ */
+int64_t qi_gui_egui_sprite_version_impl(void);
+
+/**
  * 单选按钮：selected=当前是否选中，返回 1=本帧被点击（调用方据此切换组内序号）
  */
 int32_t qi_gui_egui_radio_impl(const char *text,
