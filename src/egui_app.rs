@@ -1016,3 +1016,76 @@ pub extern "C" fn qi_gui_egui_message_impl(text: *const c_char) {
             });
     });
 }
+
+// ============================================================================
+// 单测用：脱离窗口跑一帧
+// ============================================================================
+
+/// 仅供单测：不开窗、不碰 winit/softbuffer，直接用一个裸 `egui::Context` 跑一帧，
+/// 把根 Ui 压进 FRAME，于是所有控件/画布/精灵 FFI 都能像在真帧里一样被调用。
+/// 返回这一帧产生的 `ClippedShape` 列表 —— 测试据此断言"到底画出了什么"。
+///
+/// 存在的理由：CI 和本地都可能没有屏幕录制权限，截图验不了画面；而"精灵有没有
+/// 真的变成一块带纹理的网格、四个顶点在不在该在的位置"恰恰是本层最该被钉住的
+/// 东西。跑一帧拿 shapes 比截图更准，也更稳定。
+#[cfg(test)]
+pub(crate) struct HeadlessFrame {
+    pub shapes: Vec<egui::epaint::ClippedShape>,
+    pub ctx: egui::Context,
+    pub textures_delta: egui::TexturesDelta,
+}
+
+#[cfg(test)]
+impl HeadlessFrame {
+    /// 把这一帧真的光栅化成 RGB 像素（走的就是窗口里那条 tessellate + 软光栅路径），
+    /// 返回 (像素缓冲, 宽, 高)。像素是 0x00RRGGBB。
+    ///
+    /// 有了它，"精灵到底有没有出现在屏幕上、是什么颜色"可以直接断言像素，
+    /// 不必依赖截图权限。
+    pub fn rasterize(self, w: usize, h: usize, bg: [u8; 3]) -> Vec<u32> {
+        let mut store = crate::egui_raster::TextureStore::new();
+        store.apply(&self.textures_delta.set, &self.textures_delta.free);
+        let jobs = self.ctx.tessellate(self.shapes, 1.0);
+        let mut buf = vec![0u32; w * h];
+        crate::egui_raster::paint(&mut buf, w, h, 1.0, bg, &jobs, &store);
+        buf
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn run_headless_frame(f: impl FnOnce()) -> HeadlessFrame {
+    let ctx = egui::Context::default();
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            vec2(800.0, 600.0),
+        )),
+        ..Default::default()
+    };
+    // Context::run 要 FnMut，而 f 是 FnOnce —— 装进 Option 里 take 一次
+    let mut once = Some(f);
+    let output = ctx.run(input, move |ctx| {
+        let Some(body) = once.take() else {
+            return;
+        };
+        egui::CentralPanel::default().show(ctx, |ui| {
+            FRAME.with(|fr| {
+                *fr.borrow_mut() = Some(FrameCtx {
+                    ctx: ctx.clone(),
+                    ppp: 1.0,
+                    ui_stack: vec![ui as *mut egui::Ui],
+                    containers: Vec::new(),
+                });
+            });
+            body();
+            FRAME.with(|fr| {
+                *fr.borrow_mut() = None;
+            });
+        });
+    });
+    HeadlessFrame {
+        shapes: output.shapes,
+        ctx,
+        textures_delta: output.textures_delta,
+    }
+}
