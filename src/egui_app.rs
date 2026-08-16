@@ -1,13 +1,18 @@
 //! egui 控件层 —— immediate mode GUI，由 qilang 主循环驱动
 //!
 //! ## 架构
-//! - **窗口后端**：winit 0.30（`pump_app_events` 非阻塞逐帧抽事件）。qi-gui 唯一
+//! - **窗口后端**：winit 0.30（`pump_app_events` 逐帧抽事件：动画时非阻塞，
+//!   静止时阻塞等事件）。qi-gui 唯一
 //!   窗口栈（老 tao 自绘轨已于 2026-07-18 移除，图元能力由画布层承接）。
 //! - **呈现**：softbuffer 软件帧缓冲 + `egui_raster` 自绘 epaint 网格（无 GL/GPU）。
 //! - **主循环**：qilang 侧 `当(帧开始(句柄)){ ...控件... 帧结束(句柄) }`。
 //!     - `帧开始`：pump 事件 → `ctx.begin_pass` → 建根 `Ui` 压栈 → 返回窗口是否存活。
 //!     - 控件 FFI：从 thread_local 的当前帧 `Ui` 栈顶取 `&mut Ui` 调 egui 控件。
-//!     - `帧结束`：`end_pass` → tessellate → 光栅化 → present → 60fps 限帧。
+//!     - `帧结束`：`end_pass` → 静止判定 → tessellate → 光栅化 → present → 60fps 限帧。
+//! - **静止跳帧**：画面跟上一次真画时逐字段相同就不 tessellate/不光栅化/不上屏，
+//!   同时把抽事件切到阻塞档。静止时 CPU 从 ~104% 降到 3~4%，动画场景零影响。
+//!   判定与两档事件循环的来龙去脉见 `qi_gui_egui_frame_begin_impl` /
+//!   `qi_gui_egui_frame_end_impl` 里的注释；`QI_GUI_STATS=1` 可看到跳帧账。
 //! - **immediate mode 语义**：控件状态由 qilang 侧每帧传入/取回（输入框等）。egui 内部
 //!   仅保留焦点/光标等瞬态，用 id 串标识。
 //!
@@ -45,6 +50,12 @@ struct EguiHandler {
     egui_state: Option<egui_winit::State>,
     size: (u32, u32),
     close_requested: bool,
+    /// 这一轮 pump 里收到过**真输入/窗口状态**事件（鼠标、键盘、改尺寸、焦点…）。
+    /// 静止跳帧的"立刻醒过来"闸门：`帧结束` 读一次就清零。
+    ///
+    /// 只认真事件，不认 `RedrawRequested` —— 那是我们自己每帧 `request_redraw`
+    /// 招来的，把它算进去就永远静不下来（自激）。
+    input_dirty: bool,
 }
 
 impl EguiHandler {
@@ -59,6 +70,7 @@ impl EguiHandler {
             egui_state: None,
             size: (w, h),
             close_requested: false,
+            input_dirty: true, // 第一帧必须真画
         }
     }
 
@@ -118,6 +130,38 @@ impl ApplicationHandler for EguiHandler {
         if let (Some(win), Some(state)) = (&self.window, &mut self.egui_state) {
             let _ = state.on_window_event(win, &event);
         }
+        // 白名单：哪些事件算"用户真的动了/窗口状态真的变了"，需要立刻恢复重画。
+        // 用白名单而不是黑名单 —— 漏判一个新事件的后果只是"这一帧靠形状比对兜底"，
+        // 而黑名单漏一个自激事件（比如 RedrawRequested）就会让跳帧彻底失效。
+        // 注意鼠标移动：winit 只在指针**在本窗口内**时才发 CursorMoved，
+        // 所以"鼠标在窗口外乱晃不算"是天然成立的，不用额外判。
+        if matches!(
+            event,
+            WindowEvent::CursorMoved { .. }
+                | WindowEvent::CursorEntered { .. }
+                | WindowEvent::CursorLeft { .. }
+                | WindowEvent::MouseInput { .. }
+                | WindowEvent::MouseWheel { .. }
+                | WindowEvent::KeyboardInput { .. }
+                | WindowEvent::ModifiersChanged(_)
+                | WindowEvent::Ime(_)
+                | WindowEvent::Touch(_)
+                | WindowEvent::TouchpadPressure { .. }
+                | WindowEvent::PinchGesture { .. }
+                | WindowEvent::PanGesture { .. }
+                | WindowEvent::RotationGesture { .. }
+                | WindowEvent::DoubleTapGesture { .. }
+                | WindowEvent::Resized(_)
+                | WindowEvent::ScaleFactorChanged { .. }
+                | WindowEvent::Focused(_)
+                | WindowEvent::Occluded(_)
+                | WindowEvent::ThemeChanged(_)
+                | WindowEvent::DroppedFile(_)
+                | WindowEvent::HoveredFile(_)
+                | WindowEvent::HoveredFileCancelled
+        ) {
+            self.input_dirty = true;
+        }
         match event {
             WindowEvent::CloseRequested => self.close_requested = true,
             WindowEvent::Resized(sz) => {
@@ -146,6 +190,29 @@ struct EguiApp {
     loop_start: Option<Instant>,
     /// 自动关窗时限。来自环境变量 `QI_GUI_AUTOCLOSE_MS`，未设为 None（零行为变化）。
     autoclose: Option<Duration>,
+
+    // ── 静止跳帧（见 `qi_gui_egui_frame_end_impl` 里的判定注释）────────────
+    /// 上一次**真正光栅化**那帧的形状列表。跳帧判定的主信号。
+    last_shapes: Option<Vec<egui::epaint::ClippedShape>>,
+    /// 上一次真正光栅化时的 (宽, 高, ppp 的位模式, 底色) —— 光栅结果的其余入参。
+    last_paint_key: Option<(u32, u32, u32, [u8; 3])>,
+    /// 上一次真正上屏的时刻，安全阀的基准。
+    last_paint: Instant,
+    /// 真正光栅化 + 上屏的帧数 / 判定为"画面没变"而跳过的帧数。
+    /// `QI_GUI_STATS=1` 时关窗打一行，是这项优化唯一的可观测出口。
+    painted: u64,
+    skipped: u64,
+    /// egui 自己说"要重绘"的帧数（`repaint_delay == 0`）。只统计不参与判定，
+    /// 理由见 `qi_gui_egui_frame_end_impl`。
+    egui_wanted: u64,
+    /// 上一帧是不是被跳掉了 —— 决定下一次抽事件用阻塞档还是零超时档
+    /// （见 `qi_gui_egui_frame_begin_impl` 里的超时注释）。
+    last_skipped: bool,
+    stats: bool,
+    /// 抽事件 / 光栅化各自的累计耗时。跟计数一起在 `QI_GUI_STATS=1` 时报出来 ——
+    /// 定位"CPU 到底烧在哪"时，这两个数一眼就能分清是渲染贵还是事件循环贵。
+    t_pump: Duration,
+    t_raster: Duration,
 }
 
 /// 读测试钩子 `QI_GUI_AUTOCLOSE_MS`。
@@ -286,7 +353,17 @@ pub extern "C" fn qi_gui_egui_app_create_impl(
             return 0;
         }
     };
-    event_loop.set_control_flow(ControlFlow::Poll);
+    // `Wait` 而不是 `Poll` —— 这一行是省电的关键，值得解释清楚。
+    //
+    // 帧的节奏由 qilang 主循环 + 限帧掌握，winit 这边不需要自己催。而 macOS 后端
+    // 在 `Poll` 下每轮 runloop 结束都把唤醒时刻设成"立刻"（`app_timeout =
+    // Some(Instant::now())`），加上 winit 那个重复间隔 0.1µs 的唤醒定时器，
+    // CFRunLoop 就永远在 fire→重排→`mk_timer_arm` 之间打转，线程根本睡不着 ——
+    // 实测这就是静止时 100% CPU 的大头，比软光栅还贵。
+    //
+    // 之后每帧 `帧开始` 会按动画/静止两档重设（见那里的注释）；这里设一次是给
+    // 下面"泵到窗口创建出来"的那段循环用的。
+    event_loop.set_control_flow(ControlFlow::Wait);
 
     let ctx = egui::Context::default();
     install_cjk_fonts(&ctx);
@@ -300,6 +377,18 @@ pub extern "C" fn qi_gui_egui_app_create_impl(
         alive: true,
         loop_start: None,
         autoclose: read_autoclose(),
+        last_shapes: None,
+        last_paint_key: None,
+        last_paint: Instant::now(),
+        painted: 0,
+        skipped: 0,
+        egui_wanted: 0,
+        last_skipped: false,
+        t_pump: Duration::ZERO,
+        t_raster: Duration::ZERO,
+        stats: std::env::var("QI_GUI_STATS")
+            .map(|v| v == "1")
+            .unwrap_or(false),
     };
 
     // 泵事件直到窗口创建（resumed 触发）
@@ -349,10 +438,48 @@ pub extern "C" fn qi_gui_egui_frame_begin_impl(app_id: u64) -> i32 {
             }
         }
 
-        // 非阻塞抽干事件
-        let status = app
-            .event_loop
-            .pump_app_events(Some(Duration::ZERO), &mut app.handler);
+        // ── 抽事件：动画档 / 静止档 ───────────────────────────────────────
+        //
+        // **这一段才是省电的大头，不是少光栅化。** 一开始想当然地以为静止时
+        // 100% CPU 是软光栅烧的，做完形状比对一测：光栅化从 441 帧降到 13 帧，
+        // CPU 纹丝不动，还是 103%。上 `sample` 一看，94% 的时间在
+        // `pump_app_events` 里 —— NSApplication 的 run loop 起停、CFRunLoop
+        // 观察者回调、`mk_timer_arm` 反复给唤醒定时器上弦。一次
+        // `pump_app_events(Some(ZERO))` 实测就要烧掉 ~20ms 的 CPU，比一帧
+        // 800×600 的软光栅（~23ms）还贵，而它每帧都要跑一次。
+        //
+        // 两档的分法：
+        //
+        //   * **动画档**（上一帧真画了）：`ControlFlow::Wait` + 超时 `ZERO`。
+        //     winit 走 `stop_before_wait`，抽干事件立刻返回，一点帧率都不让 ——
+        //     跟改动前完全一样（实测动画演示 327 帧、接小球 190 帧，无变化）。
+        //
+        //   * **静止档**（上一帧被判定"画面没变"跳过了）：`WaitUntil(现在+IDLE_TICK)`
+        //     + 超时 `None`。此时 winit 走 `stop_after_wait`，线程真的阻塞在
+        //     `mach_msg` 上睡觉，来事件立刻醒。CPU 从 43% 掉到 3~4%。
+        //
+        // 为什么静止档非得用 `None` 而不是"给 pump 一个非零超时"：winit 在
+        // macOS 上取 `min(pump 的超时, ControlFlow 的到期时间)` 当唤醒时刻，
+        // 而它的唤醒定时器重复间隔是 0.1µs —— 走 pump 超时那条路 run loop
+        // 会一直在 fire→重排→上弦之间打转（实测给 500ms 超时，pump 平均
+        // 26ms 就返回一次，CPU 43%）。改用 `WaitUntil` 把到期时间交给
+        // ControlFlow，定时器才真的被设到未来，线程才睡得着。
+        //
+        // 静止档的代价：画面没变时 qilang 主循环从 60Hz 降到 `IDLE_TICK` 的
+        // 30Hz 左右。这是有意的 —— 画面既然没变，主循环跑得再快也只是空转
+        //（改动前软光栅本来也只跑到 32~40fps）。任何真输入都会立刻唤醒
+        //（延迟不受 IDLE_TICK 影响），画面一动就切回动画档。
+        let t_pump = Instant::now();
+        let status = if app.last_skipped {
+            app.event_loop
+                .set_control_flow(ControlFlow::WaitUntil(Instant::now() + IDLE_TICK));
+            app.event_loop.pump_app_events(None, &mut app.handler)
+        } else {
+            app.event_loop.set_control_flow(ControlFlow::Wait);
+            app.event_loop
+                .pump_app_events(Some(Duration::ZERO), &mut app.handler)
+        };
+        app.t_pump += t_pump.elapsed();
         if let PumpStatus::Exit(_) = status {
             app.alive = false;
             return 0;
@@ -431,15 +558,67 @@ pub extern "C" fn qi_gui_egui_frame_end_impl(app_id: u64) {
 
         let output = ctx.end_pass();
         state.handle_platform_output(&window, output.platform_output);
+        // 纹理增量必须**无条件**吃掉：字体图集/图片是增量下发的，跳帧时丢一份，
+        // 后面真画的那一帧就会去引用一块不存在的纹理（花屏或缺字）。
+        let tex_changed =
+            !output.textures_delta.set.is_empty() || !output.textures_delta.free.is_empty();
         app.textures
             .apply(&output.textures_delta.set, &output.textures_delta.free);
-        let jobs = ctx.tessellate(output.shapes, ppp);
 
         let (w, h) = app.handler.size;
+        let bg = egui_raster::color32_to_rgb(ctx.style().visuals.panel_fill);
+        let paint_key = (w, h, ppp.to_bits(), bg);
+
+        // ── 静止跳帧判定 ────────────────────────────────────────────────
+        // 软光栅是纯 CPU 的：一帧 800×600 的 tessellate + 逐三角形扫描线混合要
+        // 十几到二十几毫秒，于是"什么都没变的静止画面"也能把一个核吃满
+        // （实测控件演示恒定 ~104% CPU）。课堂上的旧笔记本就是被这个烧的。
+        //
+        // 判据取**形状本身**，不取 egui 的重绘请求。理由：
+        //   * 光栅结果是个纯函数 —— 像素 = f(shapes, ppp, 画布尺寸, 纹理, 底色)。
+        //     这几项跟上次真画时逐字段相同，这一帧画出来必然是同样的像素，
+        //     再画一遍纯属白烧 CPU。这条推理对任何场景都成立，不会误判。
+        //   * egui 的 `repaint_delay` 只知道 egui 自己的控件要不要动，**不知道
+        //     qi 侧画布这一帧画了什么**。海龟/小游戏每帧改的是画布图元，egui
+        //     完全可能报"无需重绘"—— 信它就会把动画冻住。反过来它也常年报
+        //     "要重绘"（悬停动画、光标闪烁的余波），信它又一帧都省不下来。
+        //     所以它只被统计（`egui_wanted`），不参与判定。
+        //   * 输入事件只作为额外的"立刻醒过来"闸门（`input_dirty`）。严格说它是
+        //     冗余的（用户点了按钮 → 按钮外观变 → 形状就变了），留着是保险：
+        //     万一哪天有种交互改的是像素之外的东西，不至于要等安全阀。
+        if let Some(v) = output.viewport_output.get(&ViewportId::ROOT) {
+            if v.repaint_delay == Duration::ZERO {
+                app.egui_wanted += 1;
+            }
+        }
+        let input_dirty = std::mem::take(&mut app.handler.input_dirty);
+        let same_pixels = app.last_paint_key == Some(paint_key)
+            && app.last_shapes.as_ref() == Some(&output.shapes);
+
+        if should_skip(
+            same_pixels,
+            tex_changed,
+            input_dirty,
+            app.last_paint.elapsed(),
+        ) {
+            app.skipped += 1;
+            app.last_skipped = true;
+            // 跳帧时不 request_redraw：那既会招来一个白跑的 RedrawRequested，
+            // 又会让下一次阻塞抽事件被 `stop_on_redraw` 立刻打断（白等于没等）。
+            limit_fps(app);
+            return;
+        }
+        app.last_skipped = false;
+
+        // 真画：先留一份形状快照做下一帧的比对基准，再交给 tessellate（它要所有权）
+        let t_raster = Instant::now();
+        app.last_shapes = Some(output.shapes.clone());
+        app.last_paint_key = Some(paint_key);
+        let jobs = ctx.tessellate(output.shapes, ppp);
+
         if let (Some(nw), Some(nh)) = (NonZeroU32::new(w), NonZeroU32::new(h)) {
             let _ = surface.resize(nw, nh);
             if let Ok(mut buffer) = surface.buffer_mut() {
-                let bg = egui_raster::color32_to_rgb(ctx.style().visuals.panel_fill);
                 egui_raster::paint(
                     &mut buffer,
                     w as usize,
@@ -452,16 +631,70 @@ pub extern "C" fn qi_gui_egui_frame_end_impl(app_id: u64) {
                 let _ = buffer.present();
             }
         }
+        app.t_raster += t_raster.elapsed();
         window.request_redraw();
+        app.painted += 1;
+        app.last_paint = Instant::now();
 
-        // 60fps 限帧
-        let target = Duration::from_micros(1_000_000 / 60);
-        let elapsed = app.last_frame.elapsed();
-        if elapsed < target {
-            std::thread::sleep(target - elapsed);
-        }
-        app.last_frame = Instant::now();
+        limit_fps(app);
     });
+}
+
+/// 静止跳帧的安全阀间隔：再怎么判"没变"，也至少这么久真画一帧。
+const SKIP_SAFETY_INTERVAL: Duration = Duration::from_secs(1);
+
+/// 这一帧该不该跳过（不 tessellate / 不光栅化 / 不上屏）。
+///
+/// - `same_pixels`：形状 + 尺寸 + ppp + 底色都跟上次真画时逐字段相同
+///   （相同 ⇒ 画出来必然是同样的像素，见调用处的推理）
+/// - `tex_changed`：这一帧 egui 下发了纹理增量（字体图集扩了/图片换了）
+/// - `input_dirty`：这一轮抽到过真输入或窗口状态事件
+/// - `since_last_paint`：距上次真画过去了多久 —— 安全阀
+///
+/// 抽成独立函数是为了能单测：这四个条件的组合就是整套优化的全部风险面，
+/// 错一个的后果是"动画冻住"或者"一点没省"，都值得钉死。
+fn should_skip(
+    same_pixels: bool,
+    tex_changed: bool,
+    input_dirty: bool,
+    since_last_paint: Duration,
+) -> bool {
+    // 安全阀：判成"没变"也每秒至少真画一帧。
+    // 这条不是为了正确性（`same_pixels` 的纯函数推理已经够），是为了兜底最坏情况 ——
+    // 万一将来 egui 换版本让形状比对失真、或者哪个 FFI 绕过 shapes 直接改了
+    // 呈现面，后果被限制在"最多迟滞 1 秒"，而不是"窗口永久停在旧画面/白屏"。
+    // 代价是静止时 1 帧/秒的光栅化，占用可以忽略。
+    same_pixels && !tex_changed && !input_dirty && since_last_paint < SKIP_SAFETY_INTERVAL
+}
+
+/// 每帧的时间配额（60fps）—— 动画档的限帧目标。
+const FRAME_BUDGET: Duration = Duration::from_micros(1_000_000 / 60);
+
+/// 静止档主循环的兜底心跳：画面没变时，最长睡这么久就得醒一次。
+///
+/// 它不是输入延迟 —— 任何鼠标/键盘/窗口事件都会立刻把阻塞中的 run loop 叫醒。
+/// 它管的是"完全没有事件时，qilang 主循环多久转一圈"：安全阀要靠它按时到点，
+/// `QI_GUI_AUTOCLOSE_MS` 要靠它按时收工，qi 侧写在循环里的非画面逻辑
+/// （轮询、计时）也要靠它推进。
+///
+/// 取 33ms（30Hz）：阻塞档的一次抽事件实测只要几十微秒，所以 30Hz 跟 10Hz 的
+/// CPU 几乎一样（控件演示都是 4%），没必要为了省那一点点把主循环拖慢 ——
+/// 拖慢会连带影响两件事：qi 侧写在循环里的非画面逻辑（轮询、计时）会变迟钝，
+/// 以及 `qi/tests/gui自动化/断言.sh` 那条"2 秒至少 20 帧"的硬门槛会贴着线走。
+/// 30Hz 下静止的键盘演示 10 秒仍跑 358 轮（改动前 316 轮），门槛反而更宽。
+const IDLE_TICK: Duration = Duration::from_millis(33);
+
+/// 60fps 限帧。跳帧与真画共用 —— 跳帧省的是光栅化，帧循环的节奏不变，
+/// 这样输入延迟还是一帧（~16ms），交互手感跟改动前一样。
+///
+/// 静止时这一段通常睡 0 —— 配额已经在 `帧开始` 那次阻塞抽事件里等掉了。
+/// 留着它是backstop：万一某个平台的 pump 提前返回，节奏也不会失控成忙等。
+fn limit_fps(app: &mut EguiApp) {
+    let elapsed = app.last_frame.elapsed();
+    if elapsed < FRAME_BUDGET {
+        std::thread::sleep(FRAME_BUDGET - elapsed);
+    }
+    app.last_frame = Instant::now();
 }
 
 /// 改窗口标题（供 egui_widgets2 的 设置窗口标题 用）
@@ -480,7 +713,24 @@ pub(crate) fn set_window_title(app_id: u64, title: &str) {
 pub extern "C" fn qi_gui_egui_app_close_impl(app_id: u64) {
     let _ = FRAME.with(|f| f.borrow_mut().take());
     APPS.with(|a| {
-        a.borrow_mut().remove(&app_id);
+        let app = a.borrow_mut().remove(&app_id);
+        // `QI_GUI_STATS=1` 时报一行跳帧账。默认一个字都不打（零行为变化）。
+        // 这是静止跳帧唯一的可观测出口：示例自己打的「共渲染 N 帧」数的是
+        // **主循环轮数**（qi 侧的计数器），跟真正光栅化了几帧不是一回事。
+        if let Some(app) = app {
+            if app.stats {
+                let total = app.painted + app.skipped;
+                eprintln!(
+                    "egui: 帧统计 —— 主循环 {total} 帧，光栅化 {} 帧，静止跳过 {} 帧；\
+                     其中 egui 自称需要重绘 {} 帧",
+                    app.painted, app.skipped, app.egui_wanted
+                );
+                eprintln!(
+                    "egui: 耗时 —— 抽事件累计 {:?}，光栅化累计 {:?}",
+                    app.t_pump, app.t_raster
+                );
+            }
+        }
     });
 }
 
@@ -1087,5 +1337,103 @@ pub(crate) fn run_headless_frame(f: impl FnOnce()) -> HeadlessFrame {
         shapes: output.shapes,
         ctx,
         textures_delta: output.textures_delta,
+    }
+}
+
+// ============================================================================
+// 静止跳帧的单测
+// ============================================================================
+
+#[cfg(test)]
+mod skip_tests {
+    use super::*;
+    use std::ffi::CString;
+
+    const FRESH: Duration = Duration::from_millis(10);
+
+    #[test]
+    fn 画面没变就跳过() {
+        assert!(should_skip(true, false, false, FRESH));
+    }
+
+    #[test]
+    fn 画面变了必须画() {
+        assert!(!should_skip(false, false, false, FRESH));
+    }
+
+    #[test]
+    fn 纹理增量必须画() {
+        // 字体图集刚扩过/图片刚换过，跳掉这一帧屏幕上就是旧图集
+        assert!(!should_skip(true, true, false, FRESH));
+    }
+
+    #[test]
+    fn 有输入就立刻恢复重画() {
+        assert!(!should_skip(true, false, true, FRESH));
+    }
+
+    #[test]
+    fn 安全阀到点必须画() {
+        // 哪怕四项都判"没变"，超过安全阀间隔也得真画一帧 —— 防误判导致画面卡死
+        assert!(!should_skip(true, false, false, SKIP_SAFETY_INTERVAL));
+        assert!(!should_skip(
+            true,
+            false,
+            false,
+            SKIP_SAFETY_INTERVAL + Duration::from_millis(1)
+        ));
+        // 差一点点还不到，仍然跳
+        assert!(should_skip(
+            true,
+            false,
+            false,
+            SKIP_SAFETY_INTERVAL - Duration::from_millis(1)
+        ));
+    }
+
+    #[test]
+    fn 静止档心跳不能长过安全阀() {
+        // 主循环在静止档最长睡 IDLE_TICK 才转一圈；它要是比安全阀还长，
+        // 安全阀就永远迟到，"每秒至少真画一帧"这条保证会失效。
+        assert!(
+            IDLE_TICK < SKIP_SAFETY_INTERVAL,
+            "静止心跳 {IDLE_TICK:?} 必须短于安全阀 {SKIP_SAFETY_INTERVAL:?}"
+        );
+    }
+
+    /// 跳帧判据的地基：**同样的界面画两帧，产生的形状必须逐字段相等**。
+    /// 这一条要是不成立（比如 egui 哪天在形状里塞进时间戳/随机 id），
+    /// 静止跳帧就一帧都省不下来 —— 是回归而不是崩溃，只有测试能发现。
+    #[test]
+    fn 同样的界面两帧形状相同() {
+        let draw = || {
+            let text = CString::new("静止的一行字").unwrap();
+            qi_gui_egui_label_impl(text.as_ptr());
+        };
+        let a = run_headless_frame(draw);
+        let b = run_headless_frame(draw);
+        assert_eq!(a.shapes, b.shapes, "同样的界面两帧形状竟然不同");
+    }
+
+    /// 反过来：画布内容变了，形状必须跟着变。海龟/小游戏就是靠这个不被冻住 ——
+    /// egui 自己的重绘信号不知道 qi 侧画布画了什么，只有形状比对认得出来。
+    #[test]
+    fn 画布内容变了形状就变() {
+        let frame_at = |x: i64| {
+            run_headless_frame(move || {
+                let id = CString::new("场景").unwrap();
+                crate::egui_canvas::qi_gui_egui_canvas_begin_impl(id.as_ptr(), 200, 100);
+                crate::egui_canvas::qi_gui_egui_canvas_rect_impl(x, 10, 20, 20, 255, 0, 0);
+                crate::egui_canvas::qi_gui_egui_canvas_end_impl();
+            })
+        };
+        let a = frame_at(10);
+        let b = frame_at(10);
+        let c = frame_at(40);
+        assert_eq!(a.shapes, b.shapes, "同一位置的方块两帧形状应相同");
+        assert_ne!(
+            a.shapes, c.shapes,
+            "方块挪了位置，形状却没变 —— 动画会被冻住"
+        );
     }
 }
