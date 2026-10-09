@@ -1,0 +1,68 @@
+name: CI
+
+# qi-gui 被 qi-runtime 的 `gui` feature 编进 GUI 版运行时归档，发布包里的
+# libqi_runtime_gui.a 就是它。这里只管它自己：三平台编得过、单测过、clippy 无 error。
+# 「编进运行时之后能不能真开窗」归 qi 仓 CI 的 GUI 冒烟 job。
+
+on:
+  push:
+    branches: [main, "ci/**", "feat-*"]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test + Clippy (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-22.04-arm, macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # rodio → cpal → alsa-sys 走 pkg-config 找 ALSA。winit / softbuffer 的
+      # X11、Wayland、xkbcommon 都是运行时 dlopen，编译期不需要它们的 -dev 包。
+      - name: Install ALSA (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev pkg-config
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.os }}-gui-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ matrix.os }}-gui-
+
+      - name: Build
+        run: cargo build --release
+
+      # 单测不开窗（窗口相关的都在 qi 仓的冒烟里），无头 runner 上能跑
+      - name: Test
+        run: cargo test --release
+
+      # 只挡 error 级 lint。历史 warning 还有一批，先不上 -D warnings。
+      - name: Clippy
+        run: cargo clippy --release --all-targets
+
+  fmt:
+    name: Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # 跟 qi / qi-runtime 钉同一版 rustfmt —— 版本一换，中文标识符的排序就会变
+      - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
