@@ -24,6 +24,20 @@
 #define FLAG_CODE_BG 32
 
 /**
+ * 解码宽度上限。再宽软光栅也画不动，预览栏也用不着
+ */
+#define MAX_DECODE_WIDTH 960
+
+/**
+ * 帧率上限：高帧率素材按 30 抽帧
+ */
+#define MAX_FPS 30.0
+
+#define AUDIO_RATE 48000
+
+#define AUDIO_CHANNELS 2
+
+/**
  * 库版本（保留供 版本() 使用）
  */
 char *qi_gui_version_impl(void);
@@ -492,6 +506,44 @@ int64_t qi_gui_egui_image_height_impl(const char *path);
 int64_t qi_gui_egui_sprite_version_impl(void);
 
 /**
+ * 本机有没有 ffmpeg / ffprobe
+ */
+int64_t qi_gui_egui_video_available_impl(void);
+
+/**
+ * 视频加载(路径) → 句柄；没装 ffmpeg、文件打不开或没有画面都返回 0。
+ * 加载后不播放，但会马上解出第一帧当封面
+ */
+uint64_t qi_gui_egui_video_load_impl(const char *path);
+
+/**
+ * 视频画(句柄, 最大宽) → 1 本帧画面被点了 / 0。按比例占满可用宽度（再不超过最大宽，
+ * <=0 不限）；还没解出第一帧时画一块同尺寸的深色底，排版不跳
+ */
+int64_t qi_gui_egui_video_draw_impl(uint64_t id,
+                                    int64_t max_width);
+
+void qi_gui_egui_video_play_impl(uint64_t id);
+
+void qi_gui_egui_video_pause_impl(uint64_t id);
+
+/**
+ * 视频跳到(句柄, 毫秒)：播放中跳过去接着放，暂停中跳过去显示那一帧
+ */
+void qi_gui_egui_video_seek_impl(uint64_t id, int64_t ms);
+
+int64_t qi_gui_egui_video_position_impl(uint64_t id);
+
+int64_t qi_gui_egui_video_duration_impl(uint64_t id);
+
+/**
+ * 视频播放中(句柄) → 1/0；放到头自动停，返回 0
+ */
+int64_t qi_gui_egui_video_playing_impl(uint64_t id);
+
+void qi_gui_egui_video_free_impl(uint64_t id);
+
+/**
  * 单选按钮：selected=当前是否选中，返回 1=本帧被点击（调用方据此切换组内序号）
  */
 int32_t qi_gui_egui_radio_impl(const char *text,
@@ -564,5 +616,44 @@ void qi_gui_egui_window_title_impl(uint64_t app_id, const char *title);
  * 供 Qi 侧探测本批控件是否可用（返回批次号）
  */
 int64_t qi_gui_egui_widgets2_version_impl(void);
+
+/**
+ * 选择打开文件(标题, 扩展名过滤) → 路径，取消返回空串
+ */
+const char *qi_gui_dialog_open_file_impl(const char *title, const char *filters);
+
+/**
+ * 选择保存文件(标题, 默认名) → 路径，取消返回空串。默认名可以带目录，
+ * 带目录时对话框从那个目录开始
+ */
+const char *qi_gui_dialog_save_file_impl(const char *title,
+                                         const char *default_name);
+
+/**
+ * 选择文件夹(标题) → 路径，取消返回空串
+ */
+const char *qi_gui_dialog_pick_folder_impl(const char *title);
+
+/**
+ * 菜单添加(菜单名, 项名, 快捷键) → 编号（>0）；本平台没有原生菜单返回 0
+ */
+int64_t qi_gui_menu_add_impl(const char *menu,
+                             const char *item,
+                             const char *accel);
+
+/**
+ * 菜单分隔线(菜单名)
+ */
+void qi_gui_menu_separator_impl(const char *menu);
+
+/**
+ * 菜单添加编辑项(菜单名) → 1 / 0（本平台没有原生菜单）
+ */
+int64_t qi_gui_menu_add_edit_impl(const char *menu);
+
+/**
+ * 菜单被点() → 编号，没有返回 0
+ */
+int64_t qi_gui_menu_clicked_impl(void);
 
 #endif  /* QI_GUI_H */

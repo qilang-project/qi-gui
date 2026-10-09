@@ -213,6 +213,10 @@ struct EguiApp {
     /// 定位"CPU 到底烧在哪"时，这两个数一眼就能分清是渲染贵还是事件循环贵。
     t_pump: Duration,
     t_raster: Duration,
+    /// 后备帧缓冲：上次真画的完整画面，局部重画在它上面改（见 egui_damage）
+    back: Vec<u32>,
+    /// 真画的帧里走局部重画的帧数
+    partial: u64,
 }
 
 /// 读测试钩子 `QI_GUI_AUTOCLOSE_MS`。
@@ -404,6 +408,8 @@ pub extern "C" fn qi_gui_egui_app_create_impl(
         last_skipped: false,
         t_pump: Duration::ZERO,
         t_raster: Duration::ZERO,
+        back: Vec::new(),
+        partial: 0,
         stats: std::env::var("QI_GUI_STATS")
             .map(|v| v == "1")
             .unwrap_or(false),
@@ -518,6 +524,14 @@ pub extern "C" fn qi_gui_egui_frame_begin_impl(app_id: u64) -> i32 {
         if crate::egui_script::inject(&mut raw_input) {
             app.handler.input_dirty = true;
         }
+        // 原生菜单：用户项进队列等 qi 轮询，编辑项变成 egui 事件塞进这一帧
+        if crate::native_menu::poll(&mut raw_input, &mut || state.clipboard_text()) {
+            app.handler.input_dirty = true;
+        }
+        if crate::native_menu::take_quit() {
+            app.alive = false;
+            return 0;
+        }
         let ctx = app.handler.egui_ctx.clone();
         ctx.begin_pass(raw_input);
         // 抓这一帧的键盘快照（必须在 begin_pass 之后，那时 InputState 才是本帧的）
@@ -627,7 +641,9 @@ pub extern "C" fn qi_gui_egui_frame_end_impl(app_id: u64) {
             )
         {
             app.skipped += 1;
-            app.last_skipped = true;
+            // 视频在放时画面没变只是"下一帧还没到点"，别切到静止档（30Hz 心跳会把
+            // 换帧时机拖晚最多 33ms）；省下光栅化就够了
+            app.last_skipped = !crate::egui_video::any_playing();
             // 跳帧时不 request_redraw：那既会招来一个白跑的 RedrawRequested，
             // 又会让下一次阻塞抽事件被 `stop_on_redraw` 立刻打断（白等于没等）。
             limit_fps(app);
@@ -637,22 +653,47 @@ pub extern "C" fn qi_gui_egui_frame_end_impl(app_id: u64) {
 
         // 真画：先留一份形状快照做下一帧的比对基准，再交给 tessellate（它要所有权）
         let t_raster = Instant::now();
+        // 局部重画：跟上次真画那帧比，只重画变了的几块（见 egui_damage）。
+        // 后备缓冲 `back` 永远是上次真画的完整画面，局部画在它上面再整块拷上屏
+        let (fw, fh) = (w as usize, h as usize);
+        let damage = match &app.last_shapes {
+            Some(old)
+                if app.last_paint_key == Some(paint_key)
+                    && app.back.len() == fw * fh
+                    && !crate::egui_damage::disabled() =>
+            {
+                crate::egui_damage::dirty_rects(
+                    old,
+                    &output.shapes,
+                    &output.textures_delta.set,
+                    &output.textures_delta.free,
+                    ppp,
+                    fw,
+                    fh,
+                )
+            }
+            _ => None,
+        };
         app.last_shapes = Some(output.shapes.clone());
         app.last_paint_key = Some(paint_key);
         let jobs = ctx.tessellate(output.shapes, ppp);
+        app.back.resize(fw * fh, 0);
+        match &damage {
+            Some(rects) => {
+                for r in rects {
+                    egui_raster::paint_region(&mut app.back, fw, ppp, bg, &jobs, &app.textures, *r);
+                }
+                app.partial += 1;
+            }
+            None => egui_raster::paint(&mut app.back, fw, fh, ppp, bg, &jobs, &app.textures),
+        }
 
         if let (Some(nw), Some(nh)) = (NonZeroU32::new(w), NonZeroU32::new(h)) {
             let _ = surface.resize(nw, nh);
             if let Ok(mut buffer) = surface.buffer_mut() {
-                egui_raster::paint(
-                    &mut buffer,
-                    w as usize,
-                    h as usize,
-                    ppp,
-                    bg,
-                    &jobs,
-                    &app.textures,
-                );
+                if buffer.len() == app.back.len() {
+                    buffer.copy_from_slice(&app.back);
+                }
                 if let Some(path) = &shot {
                     crate::egui_script::save_png(path, &buffer, w, h);
                 }
@@ -736,10 +777,31 @@ pub(crate) fn set_window_title(app_id: u64, title: &str) {
     });
 }
 
+/// 已经有窗口了（macOS 原生菜单要等事件循环和窗口建好再挂）
+#[cfg(target_os = "macos")]
+pub(crate) fn has_window() -> bool {
+    APPS.with(|a| a.borrow().values().any(|app| app.handler.window.is_some()))
+}
+
+/// 第一个窗口的 HWND（Windows 原生菜单挂在它上面）
+#[cfg(target_os = "windows")]
+pub(crate) fn main_hwnd() -> Option<isize> {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    APPS.with(|a| {
+        let apps = a.borrow();
+        let window = apps.values().find_map(|app| app.handler.window.clone())?;
+        match window.window_handle().ok()?.as_raw() {
+            RawWindowHandle::Win32(h) => Some(h.hwnd.get()),
+            _ => None,
+        }
+    })
+}
+
 /// 关闭应用（销毁窗口，释放资源）
 #[no_mangle]
 pub extern "C" fn qi_gui_egui_app_close_impl(app_id: u64) {
     let _ = FRAME.with(|f| f.borrow_mut().take());
+    crate::egui_video::release_all();
     APPS.with(|a| {
         let app = a.borrow_mut().remove(&app_id);
         // `QI_GUI_STATS=1` 时报一行跳帧账。默认一个字都不打（零行为变化）。
@@ -749,9 +811,9 @@ pub extern "C" fn qi_gui_egui_app_close_impl(app_id: u64) {
             if app.stats {
                 let total = app.painted + app.skipped;
                 eprintln!(
-                    "egui: 帧统计 —— 主循环 {total} 帧，光栅化 {} 帧，静止跳过 {} 帧；\
+                    "egui: 帧统计 —— 主循环 {total} 帧，光栅化 {} 帧（局部 {}），静止跳过 {} 帧；\
                      其中 egui 自称需要重绘 {} 帧",
-                    app.painted, app.skipped, app.egui_wanted
+                    app.painted, app.partial, app.skipped, app.egui_wanted
                 );
                 eprintln!(
                     "egui: 耗时 —— 抽事件累计 {:?}，光栅化累计 {:?}",

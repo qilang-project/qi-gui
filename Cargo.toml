@@ -26,6 +26,17 @@ egui_plot = "0.29"
 winit = "0.30"
 softbuffer = "0.4"
 
+# 原生文件对话框。Linux 只开 xdg-portal（D-Bus 纯 Rust，没有 portal 时退到 zenity），
+# 不开默认的 wayland（要链 libwayland）也不开 gtk3 —— 不给 Linux 构建加系统依赖
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+
+# 原生菜单栏：只在 macOS / Windows。muda 在 Linux 要 GTK，那边菜单 FFI 是空实现
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+muda = { version = "0.21", default-features = false }
+# 系统剪贴板：egui-winit 不开剪贴板时只有进程内的假剪贴板（拷出去贴不到别的程序）。
+# 只在 macOS / Windows 开 arboard；Linux 那份要 smithay-clipboard（Wayland），先不动
+egui-winit = { version = "0.29", default-features = false, features = ["arboard"] }
+
 [build-dependencies]
 cbindgen = "0.27"
 
