@@ -10,6 +10,8 @@ pub mod audio_ffi;
 pub mod egui_app;
 pub mod egui_canvas;
 pub mod egui_editor;
+pub mod egui_editor_buf;
+pub mod egui_ime;
 pub mod egui_keyboard;
 pub mod egui_raster;
 pub mod egui_script;

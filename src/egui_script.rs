@@ -15,7 +15,14 @@
 //! 30 shot /tmp/a.png      # 这一帧画完后把帧缓冲存成 PNG
 //! 40 drop /tmp/b.png      # 模拟把文件拖进窗口
 //! 50 scroll 900 400 -300  # 鼠标移到 (900, 400) 滚轮滚 -300 点（负数往下翻）
+//! 60 ime-preedit ni hao    # 输入法组字（第一次前面自动带 Ime::Enabled）
+//! 61 ime-commit 你好       # 输入法提交
+//! 62 ime-cancel            # 组字串清空（退格删光 / Esc）
 //! ```
+//!
+//! 输入法三个动作合成的是 **winit** 事件（顺序照 macOS 上 winit 0.30 的实际发法：
+//! 提交 = 空组字 + Commit），跟真事件一样先过 egui_ime 的补丁、再由 egui-winit 翻译，
+//! 所以测到的是真实路径，不是直接塞 egui 事件。
 
 use crate::egui_keyboard::{key_from_name, KeyTarget};
 use std::cell::RefCell;
@@ -32,6 +39,9 @@ enum Action {
     Shot(String),
     Drop(String),
     Scroll(f32, f32, f32),
+    ImePreedit(String),
+    ImeCommit(String),
+    ImeCancel,
 }
 
 #[derive(Default)]
@@ -40,6 +50,8 @@ struct Script {
     steps: Vec<(u64, Action)>,
     frame: u64,
     shot_now: Option<String>,
+    /// 已经发过 Ime::Enabled（winit 只在第一次组字前发一次）
+    ime_on: bool,
 }
 
 thread_local! {
@@ -89,11 +101,22 @@ fn parse(text: &str) -> Vec<(u64, Action)> {
                     (frame + 1, Action::Release(x, y)),
                 ]
             }),
-            "text" => {
-                // text 后面整行原样输入；行内 # 不当注释
-                let t = raw.trim_start().splitn(3, ' ').nth(2).unwrap_or("");
-                Some(vec![(frame, Action::Text(t.to_string()))])
+            "text" | "ime-preedit" | "ime-commit" => {
+                // 后面整行原样输入；行内 # 不当注释
+                let t = raw
+                    .trim_start()
+                    .splitn(3, ' ')
+                    .nth(2)
+                    .unwrap_or("")
+                    .to_string();
+                let a = match verb {
+                    "text" => Action::Text(t),
+                    "ime-preedit" => Action::ImePreedit(t),
+                    _ => Action::ImeCommit(t),
+                };
+                Some(vec![(frame, a)])
             }
+            "ime-cancel" => Some(vec![(frame, Action::ImeCancel)]),
             "key" => key(rest).map(|k| vec![(frame, Action::Key(k, Modifiers::NONE))]),
             "cmd" => key(rest).map(|k| vec![(frame, Action::Key(k, command_mods(false)))]),
             "cmd+shift" => key(rest).map(|k| vec![(frame, Action::Key(k, command_mods(true)))]),
@@ -119,20 +142,66 @@ fn parse(text: &str) -> Vec<(u64, Action)> {
     steps
 }
 
+fn ensure_loaded(s: &mut Script) {
+    if s.loaded {
+        return;
+    }
+    s.loaded = true;
+    if let Ok(path) = std::env::var("QI_GUI_SCRIPT") {
+        match std::fs::read_to_string(&path) {
+            Ok(text) => s.steps = parse(&text),
+            Err(e) => eprintln!("qi-gui：读不了脚本 {path}：{e}"),
+        }
+    }
+}
+
+/// 帧开始、取 egui 输入**之前**调用：本帧的输入法动作合成成 winit 事件
+pub(crate) fn winit_events() -> Vec<winit::event::WindowEvent> {
+    use winit::event::{Ime, WindowEvent};
+    SCRIPT.with(|s| {
+        let mut s = s.borrow_mut();
+        ensure_loaded(&mut s);
+        let frame = s.frame;
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < s.steps.len() && s.steps[i].0 <= frame {
+            let is_ime = matches!(
+                s.steps[i].1,
+                Action::ImePreedit(_) | Action::ImeCommit(_) | Action::ImeCancel
+            );
+            if !is_ime {
+                i += 1;
+                continue;
+            }
+            let (_, action) = s.steps.remove(i);
+            let clear = || WindowEvent::Ime(Ime::Preedit(String::new(), None));
+            match action {
+                Action::ImePreedit(t) if t.is_empty() => out.push(clear()),
+                Action::ImePreedit(t) => {
+                    if !s.ime_on {
+                        s.ime_on = true;
+                        out.push(WindowEvent::Ime(Ime::Enabled));
+                    }
+                    let n = t.len();
+                    out.push(WindowEvent::Ime(Ime::Preedit(t, Some((n, n)))));
+                }
+                Action::ImeCommit(t) => {
+                    out.push(clear());
+                    out.push(WindowEvent::Ime(Ime::Commit(t)));
+                }
+                _ => out.push(clear()),
+            }
+        }
+        out
+    })
+}
+
 /// 帧开始时调用：把本帧该发生的事件塞进 RawInput。返回本帧是否注入了事件
 /// （调用方据此把这一帧当成"有输入"，不让静止跳帧吞掉）。
 pub(crate) fn inject(raw: &mut egui::RawInput) -> bool {
     SCRIPT.with(|s| {
         let mut s = s.borrow_mut();
-        if !s.loaded {
-            s.loaded = true;
-            if let Ok(path) = std::env::var("QI_GUI_SCRIPT") {
-                match std::fs::read_to_string(&path) {
-                    Ok(text) => s.steps = parse(&text),
-                    Err(e) => eprintln!("qi-gui：读不了脚本 {path}：{e}"),
-                }
-            }
-        }
+        ensure_loaded(&mut s);
         let frame = s.frame;
         s.frame += 1;
         let mut injected = false;
@@ -178,6 +247,8 @@ pub(crate) fn inject(raw: &mut egui::RawInput) -> bool {
                     path: Some(path.into()),
                     ..Default::default()
                 }),
+                // 输入法动作已在 winit_events 里取走
+                Action::ImePreedit(_) | Action::ImeCommit(_) | Action::ImeCancel => {}
             }
         }
         injected
@@ -216,7 +287,10 @@ mod tests {
              13 key Enter\n\
              14 cmd S\n\
              15 cmd+shift S\n\
-             16 bogus\n",
+             16 bogus\n\
+             17 ime-preedit ni hao\n\
+             18 ime-commit 你好\n\
+             19 ime-cancel\n",
         );
         assert_eq!(steps[0], (10, Action::Press(400.0, 300.0)));
         assert_eq!(steps[1], (11, Action::Release(400.0, 300.0)));
@@ -227,7 +301,10 @@ mod tests {
         assert_eq!(steps[3], (13, Action::Key(Key::Enter, Modifiers::NONE)));
         assert!(matches!(steps[4], (14, Action::Key(Key::S, m)) if m.command && !m.shift));
         assert!(matches!(steps[5], (15, Action::Key(Key::S, m)) if m.command && m.shift));
-        assert_eq!(steps[6], (20, Action::Shot("/tmp/x.png".into())));
-        assert_eq!(steps.len(), 7, "看不懂的行跳过");
+        assert_eq!(steps[6], (17, Action::ImePreedit("ni hao".into())));
+        assert_eq!(steps[7], (18, Action::ImeCommit("你好".into())));
+        assert_eq!(steps[8], (19, Action::ImeCancel));
+        assert_eq!(steps[9], (20, Action::Shot("/tmp/x.png".into())));
+        assert_eq!(steps.len(), 10, "看不懂的行跳过");
     }
 }

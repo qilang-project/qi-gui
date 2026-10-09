@@ -295,3 +295,50 @@ fn raster_mesh(
 pub fn color32_to_rgb(c: Color32) -> [u8; 3] {
     [c.r(), c.g(), c.b()]
 }
+
+/// 两帧的形状列表是否画出同样的像素（静止跳帧的判据）。
+///
+/// 跟 `==` 的区别只在文字形状：排版结果 `Arc<Galley>` 是同一个指针就直接算相同。
+/// `Galley` 含浮点，标准库对 `Arc` 的指针相等捷径用不上，`==` 会逐字形深比 ——
+/// 几 MB 的编辑区每帧要比几百万个字形。编辑区缓存了排版结果，没改动时每帧
+/// 拿到的是同一个 `Arc`，这里一比指针就够了。
+pub fn shapes_same(a: &[egui::epaint::ClippedShape], b: &[egui::epaint::ClippedShape]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|(x, y)| x.clip_rect == y.clip_rect && shape_same(&x.shape, &y.shape))
+}
+
+fn shape_same(a: &egui::Shape, b: &egui::Shape) -> bool {
+    use egui::Shape;
+    match (a, b) {
+        (Shape::Text(x), Shape::Text(y)) => {
+            (std::sync::Arc::ptr_eq(&x.galley, &y.galley) || x.galley == y.galley)
+                && x.pos == y.pos
+                && x.underline == y.underline
+                && x.fallback_color == y.fallback_color
+                && x.override_text_color == y.override_text_color
+                && x.opacity_factor == y.opacity_factor
+                && x.angle == y.angle
+        }
+        (Shape::Vec(x), Shape::Vec(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(p, q)| shape_same(p, q))
+        }
+        _ => a == b,
+    }
+}
+
+/// 形状列表里有没有只剩这一份引用的大段排版（几十万个顶点以上）：释放这种排版很慢，
+/// 值得挪到后台线程。还被别处（编辑区缓存、新一帧的形状）引用着的，放掉只是减个计数
+pub fn holds_big_galley(shapes: &[egui::epaint::ClippedShape]) -> bool {
+    fn big(shape: &egui::Shape) -> bool {
+        match shape {
+            egui::Shape::Text(t) => {
+                t.galley.num_vertices > 200_000 && std::sync::Arc::strong_count(&t.galley) == 1
+            }
+            egui::Shape::Vec(v) => v.iter().any(big),
+            _ => false,
+        }
+    }
+    shapes.iter().any(|c| big(&c.shape))
+}

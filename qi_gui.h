@@ -24,6 +24,29 @@
 #define FLAG_CODE_BG 32
 
 /**
+ * 高亮样式位（与 qi 侧 高亮.qi 的常量一致）
+ */
+#define HL_HEADING 1
+
+#define HL_BOLD 2
+
+#define HL_ITALIC 4
+
+#define HL_CODE 8
+
+#define HL_LINK 16
+
+#define HL_MARKER 32
+
+#define HL_QUOTE 64
+
+#define HL_BLOCK 128
+
+#define HL_STRIKE 256
+
+#define HL_LIST 512
+
+/**
  * 库版本（保留供 版本() 使用）
  */
 char *qi_gui_version_impl(void);
@@ -346,6 +369,17 @@ const char *qi_gui_egui_editor_impl(const char *id,
 int64_t qi_gui_egui_editor_cursor_impl(void);
 
 /**
+ * 编辑区光标行() → 光标在第几行（按换行分，从 1 起，折行不算）；没有光标时 -1。
+ * 状态栏「行:列」直接用它，qi 不必为了数行把正文切开
+ */
+int64_t qi_gui_egui_editor_cursor_row_impl(void);
+
+/**
+ * 编辑区光标列() → 光标是本行第几个字符（从 1 起）；没有光标时 -1
+ */
+int64_t qi_gui_egui_editor_cursor_col_impl(void);
+
+/**
  * 设置编辑区光标(id, 字符下标)：下一帧生效（协同编辑合入远端改动后挪光标用）
  */
 void qi_gui_egui_editor_set_cursor_impl(const char *id,
@@ -428,6 +462,43 @@ int64_t qi_gui_egui_seek_bar_impl(const char *_id, int64_t permille, int64_t wid
  * 拖入文件() → 这一帧拖进窗口的文件路径，多个用换行分开；没有则空串
  */
 const char *qi_gui_egui_dropped_files_impl(void);
+
+/**
+ * 托管编辑区(id, 等宽, 字号) → 版本：撑满剩余区域的多行输入，自带纵向滚动。
+ * 正文在 Rust 这边，内容每改一次版本 +1。调用后 编辑区光标() 照常可用。
+ */
+int64_t qi_gui_egui_editor_managed_impl(const char *id,
+                                        int64_t mono,
+                                        int64_t size);
+
+/**
+ * 设置编辑区文本(id, 文本)：整篇换掉（打开文件、新建、程序插入内容），版本 +1，高亮清空
+ */
+void qi_gui_egui_editor_set_text_impl(const char *id,
+                                      const char *text);
+
+/**
+ * 编辑区文本(id) → 当前正文（只在版本变了时取）
+ */
+const char *qi_gui_egui_editor_text_impl(const char *id);
+
+/**
+ * 编辑区版本(id) → 内容版本号；没建过的编辑区返回 0
+ */
+int64_t qi_gui_egui_editor_version_impl(const char *id);
+
+/**
+ * 设置编辑区高亮(id, "起,止,样式;…")：对着当前正文算的字节区间；空串 = 不高亮。
+ * 跟正文改动后挪过位的旧区间一模一样时什么都不做（不重排）
+ */
+void qi_gui_egui_editor_set_highlight_impl(const char *id,
+                                           const char *spec);
+
+/**
+ * 设置高亮颜色(样式位, 颜色)：覆盖某个样式的颜色；颜色 <0 恢复从外观派生的默认色
+ */
+void qi_gui_egui_set_highlight_color_impl(int64_t bits,
+                                          int64_t color);
 
 /**
  * 按键按住(键名) → 1/0：这一帧该键是否处于按下状态（持续触发，适合移动）

@@ -7,7 +7,8 @@
 //! - 分栏：`columns_begin(左栏千分比)` / `columns_next` / `columns_end`，
 //!   两栏占满剩余区域，中间画分隔线
 //! - 编辑区：撑满剩余区域的多行输入，自带纵向滚动；能读写光标（字符下标），
-//!   状态栏「行:列」和以后的协同编辑都靠它
+//!   状态栏「行:列」和以后的协同编辑都靠它。大文档用 egui_editor_buf.rs 的托管编辑区
+//!   （正文留在 Rust、按版本取、带源码高亮），这里的编辑区每帧往返全文
 //! - 组合键：Cmd（macOS）/ Ctrl（其它）+ 键，可选 Shift；按下即消费，不再落进输入框
 //! - 外观：`设置外观` 一次给全套配色和基准字号；`设置窗口边距`；`区域开始/结束`
 //!   （定高或撑满、内边距、底色、最大宽居中）；`右对齐开始/结束`；`空白(像素)`
@@ -44,6 +45,8 @@ thread_local! {
     static RICH: RefCell<Option<LayoutJob>> = const { RefCell::new(None) };
     /// 最近一次编辑区调用后的光标（字符下标）；没有焦点时为 -1
     static LAST_CURSOR: Cell<i64> = const { Cell::new(-1) };
+    /// 同一个光标的（行, 列），都从 1 起；没有焦点时 (-1, -1)
+    static LAST_ROW_COL: Cell<(i64, i64)> = const { Cell::new((-1, -1)) };
 }
 
 /// 注册粗体字族（字体安装时调用）。找不到粗体字体就不注册，片段的粗体退回常规字重。
@@ -75,8 +78,31 @@ pub(crate) fn install_bold_font(fonts: &mut egui::FontDefinitions) {
     }
 }
 
-fn unpack_rgb(c: i64) -> Color32 {
+pub(crate) fn unpack_rgb(c: i64) -> Color32 {
     Color32::from_rgb((c >> 16) as u8, (c >> 8) as u8, c as u8)
+}
+
+/// 粗体字族；系统里没找到粗体字体时为 None（调用方退回常规字族）
+pub(crate) fn bold_family() -> Option<FontFamily> {
+    BOLD_READY
+        .load(Ordering::Relaxed)
+        .then(|| FontFamily::Name(BOLD_FAMILY.into()))
+}
+
+/// 设置外观 给的弱文字色；没设过为 None
+pub(crate) fn weak_color() -> Option<Color32> {
+    let c = WEAK.with(|c| c.get());
+    (c != Color32::TRANSPARENT).then_some(c)
+}
+
+/// 记下编辑区光标：字符下标 + 逻辑行（按换行分的段）与段内第几个字符
+pub(crate) fn set_last_cursor(cursor: Option<egui::epaint::text::cursor::Cursor>) {
+    LAST_CURSOR.with(|c| c.set(cursor.map_or(-1, |p| p.ccursor.index as i64)));
+    LAST_ROW_COL.with(|c| {
+        c.set(cursor.map_or((-1, -1), |p| {
+            (p.pcursor.paragraph as i64 + 1, p.pcursor.offset as i64 + 1)
+        }))
+    });
 }
 
 fn span_format(ui: &egui::Ui, size: i64, flags: i64, color: i64) -> TextFormat {
@@ -297,7 +323,7 @@ pub extern "C" fn qi_gui_egui_columns_end_impl() {
     });
 }
 
-fn editor_id(id: &str) -> Id {
+pub(crate) fn editor_id(id: &str) -> Id {
     Id::new(("qi_editor", id))
 }
 
@@ -312,7 +338,7 @@ pub extern "C" fn qi_gui_egui_editor_impl(
 ) -> *const c_char {
     let id = cstr(id);
     let mut buf = cstr(value);
-    let mut cursor = -1i64;
+    let mut cursor = None;
     with_top_ui(|ui| {
         let avail = ui.available_size();
         let family = if mono != 0 {
@@ -352,12 +378,10 @@ pub extern "C" fn qi_gui_egui_editor_impl(
                     .desired_width(f32::INFINITY)
                     .min_size(vec2(0.0, avail.y))
                     .show(ui);
-                if let Some(r) = out.cursor_range {
-                    cursor = r.primary.ccursor.index as i64;
-                }
+                cursor = out.cursor_range.map(|r| r.primary);
             });
     });
-    LAST_CURSOR.with(|c| c.set(cursor));
+    set_last_cursor(cursor);
     ret_str(buf)
 }
 
@@ -365,6 +389,19 @@ pub extern "C" fn qi_gui_egui_editor_impl(
 #[no_mangle]
 pub extern "C" fn qi_gui_egui_editor_cursor_impl() -> i64 {
     LAST_CURSOR.with(|c| c.get())
+}
+
+/// 编辑区光标行() → 光标在第几行（按换行分，从 1 起，折行不算）；没有光标时 -1。
+/// 状态栏「行:列」直接用它，qi 不必为了数行把正文切开
+#[no_mangle]
+pub extern "C" fn qi_gui_egui_editor_cursor_row_impl() -> i64 {
+    LAST_ROW_COL.with(|c| c.get().0)
+}
+
+/// 编辑区光标列() → 光标是本行第几个字符（从 1 起）；没有光标时 -1
+#[no_mangle]
+pub extern "C" fn qi_gui_egui_editor_cursor_col_impl() -> i64 {
+    LAST_ROW_COL.with(|c| c.get().1)
 }
 
 /// 设置编辑区光标(id, 字符下标)：下一帧生效（协同编辑合入远端改动后挪光标用）
@@ -429,7 +466,7 @@ pub extern "C" fn qi_gui_egui_window_margin_impl(px: i64) {
 }
 
 /// 两色按比例混合：t=0 全是 a，t=1 全是 b
-fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
+pub(crate) fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     let f = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
     Color32::from_rgb(f(a.r(), b.r()), f(a.g(), b.g()), f(a.b(), b.b()))
 }

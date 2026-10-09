@@ -56,6 +56,8 @@ struct EguiHandler {
     /// 只认真事件，不认 `RedrawRequested` —— 那是我们自己每帧 `request_redraw`
     /// 招来的，把它算进去就永远静不下来（自激）。
     input_dirty: bool,
+    /// 输入法补丁与日志（见 egui_ime.rs）
+    ime: crate::egui_ime::ImeTracker,
 }
 
 impl EguiHandler {
@@ -71,6 +73,7 @@ impl EguiHandler {
             size: (w, h),
             close_requested: false,
             input_dirty: true, // 第一帧必须真画
+            ime: crate::egui_ime::ImeTracker::new(),
         }
     }
 
@@ -127,7 +130,20 @@ impl ApplicationHandler for EguiHandler {
     }
 
     fn window_event(&mut self, _el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        self.handle_window_event(event);
+    }
+
+    fn about_to_wait(&mut self, _el: &ActiveEventLoop) {}
+}
+
+impl EguiHandler {
+    /// 窗口事件的实际处理。拆出来是为了让 QI_GUI_SCRIPT 回放的输入法事件
+    /// 走跟真 winit 事件同一条路（egui-winit 翻译 + egui_ime 补丁）
+    fn handle_window_event(&mut self, event: WindowEvent) {
         if let (Some(win), Some(state)) = (&self.window, &mut self.egui_state) {
+            if let WindowEvent::Ime(ime) = &event {
+                self.ime.before_winit_event(state.egui_input_mut(), ime);
+            }
             let _ = state.on_window_event(win, &event);
         }
         // 白名单：哪些事件算"用户真的动了/窗口状态真的变了"，需要立刻恢复重画。
@@ -170,8 +186,6 @@ impl ApplicationHandler for EguiHandler {
             _ => {}
         }
     }
-
-    fn about_to_wait(&mut self, _el: &ActiveEventLoop) {}
 }
 
 /// 一个 egui 应用实例（窗口 + 事件循环 + 纹理仓库 + 限帧状态）
@@ -213,6 +227,15 @@ struct EguiApp {
     /// 定位"CPU 到底烧在哪"时，这两个数一眼就能分清是渲染贵还是事件循环贵。
     t_pump: Duration,
     t_raster: Duration,
+    /// 每帧耗时：`帧开始` 返回到 `帧结束` 进来之间（qi 侧逻辑 + 控件 FFI，记作「控件」），
+    /// 和 `帧结束` 自己（end_pass + 跳帧判定 + 光栅化上屏，不含限帧睡眠，记作「收尾」）。
+    /// `QI_GUI_STATS=1` 报平均/最长，`=2` 另外逐帧打一行。
+    body_start: Instant,
+    t_body: Duration,
+    body_max: Duration,
+    t_finish: Duration,
+    finish_max: Duration,
+    stats_frames: bool,
 }
 
 /// 读测试钩子 `QI_GUI_AUTOCLOSE_MS`。
@@ -404,9 +427,13 @@ pub extern "C" fn qi_gui_egui_app_create_impl(
         last_skipped: false,
         t_pump: Duration::ZERO,
         t_raster: Duration::ZERO,
-        stats: std::env::var("QI_GUI_STATS")
-            .map(|v| v == "1")
-            .unwrap_or(false),
+        body_start: Instant::now(),
+        t_body: Duration::ZERO,
+        body_max: Duration::ZERO,
+        t_finish: Duration::ZERO,
+        finish_max: Duration::ZERO,
+        stats: std::env::var("QI_GUI_STATS").is_ok_and(|v| v == "1" || v == "2"),
+        stats_frames: std::env::var("QI_GUI_STATS").is_ok_and(|v| v == "2"),
     };
 
     // 泵事件直到窗口创建（resumed 触发）
@@ -507,6 +534,10 @@ pub extern "C" fn qi_gui_egui_frame_begin_impl(app_id: u64) -> i32 {
             return 0;
         }
 
+        // QI_GUI_SCRIPT 回放的输入法事件：当成 winit 事件喂进去，走真实路径
+        for event in crate::egui_script::winit_events() {
+            app.handler.handle_window_event(event);
+        }
         let (Some(window), Some(state)) =
             (app.handler.window.clone(), app.handler.egui_state.as_mut())
         else {
@@ -545,6 +576,7 @@ pub extern "C" fn qi_gui_egui_frame_begin_impl(app_id: u64) -> i32 {
                 containers: Vec::new(),
             });
         });
+        app.body_start = Instant::now();
         1
     })
 }
@@ -570,6 +602,10 @@ pub extern "C" fn qi_gui_egui_frame_end_impl(app_id: u64) {
         let Some(app) = apps.get_mut(&app_id) else {
             return;
         };
+        let finish_start = Instant::now();
+        let body = finish_start - app.body_start;
+        app.t_body += body;
+        app.body_max = app.body_max.max(body);
         let (Some(window), Some(state), Some(surface)) = (
             app.handler.window.clone(),
             app.handler.egui_state.as_mut(),
@@ -578,7 +614,10 @@ pub extern "C" fn qi_gui_egui_frame_end_impl(app_id: u64) {
             return;
         };
 
-        let output = ctx.end_pass();
+        let mut output = ctx.end_pass();
+        app.handler
+            .ime
+            .before_platform_output(&mut output.platform_output, ppp);
         state.handle_platform_output(&window, output.platform_output);
         // 纹理增量必须**无条件**吃掉：字体图集/图片是增量下发的，跳帧时丢一份，
         // 后面真画的那一帧就会去引用一块不存在的纹理（花屏或缺字）。
@@ -616,7 +655,10 @@ pub extern "C" fn qi_gui_egui_frame_end_impl(app_id: u64) {
         let input_dirty = std::mem::take(&mut app.handler.input_dirty);
         let shot = crate::egui_script::take_shot();
         let same_pixels = app.last_paint_key == Some(paint_key)
-            && app.last_shapes.as_ref() == Some(&output.shapes);
+            && app
+                .last_shapes
+                .as_ref()
+                .is_some_and(|last| egui_raster::shapes_same(last, &output.shapes));
 
         if shot.is_none()
             && should_skip(
@@ -628,6 +670,7 @@ pub extern "C" fn qi_gui_egui_frame_end_impl(app_id: u64) {
         {
             app.skipped += 1;
             app.last_skipped = true;
+            note_finish(app, body, finish_start.elapsed(), false);
             // 跳帧时不 request_redraw：那既会招来一个白跑的 RedrawRequested，
             // 又会让下一次阻塞抽事件被 `stop_on_redraw` 立刻打断（白等于没等）。
             limit_fps(app);
@@ -637,7 +680,12 @@ pub extern "C" fn qi_gui_egui_frame_end_impl(app_id: u64) {
 
         // 真画：先留一份形状快照做下一帧的比对基准，再交给 tessellate（它要所有权）
         let t_raster = Instant::now();
-        app.last_shapes = Some(output.shapes.clone());
+        let old = app.last_shapes.replace(output.shapes.clone());
+        // 上一版形状里要是有大段排版（几 MB 的编辑区），释放它要十几到几十毫秒 ——
+        // 扔到后台线程去放，不占这一帧
+        if let Some(old) = old.filter(|o| egui_raster::holds_big_galley(o)) {
+            std::thread::spawn(move || drop(old));
+        }
         app.last_paint_key = Some(paint_key);
         let jobs = ctx.tessellate(output.shapes, ppp);
 
@@ -664,8 +712,24 @@ pub extern "C" fn qi_gui_egui_frame_end_impl(app_id: u64) {
         app.painted += 1;
         app.last_paint = Instant::now();
 
+        note_finish(app, body, finish_start.elapsed(), true);
         limit_fps(app);
     });
+}
+
+/// 记一帧的收尾耗时；`QI_GUI_STATS=2` 时逐帧打一行
+fn note_finish(app: &mut EguiApp, body: Duration, finish: Duration, painted: bool) {
+    app.t_finish += finish;
+    app.finish_max = app.finish_max.max(finish);
+    if app.stats_frames {
+        eprintln!(
+            "egui: 帧 {} 控件 {:.2}ms 收尾 {:.2}ms {}",
+            app.painted + app.skipped,
+            body.as_secs_f64() * 1000.0,
+            finish.as_secs_f64() * 1000.0,
+            if painted { "画" } else { "跳" }
+        );
+    }
 }
 
 /// 静止跳帧的安全阀间隔：再怎么判"没变"，也至少这么久真画一帧。
@@ -756,6 +820,16 @@ pub extern "C" fn qi_gui_egui_app_close_impl(app_id: u64) {
                 eprintln!(
                     "egui: 耗时 —— 抽事件累计 {:?}，光栅化累计 {:?}",
                     app.t_pump, app.t_raster
+                );
+                let n = total.max(1) as f64;
+                let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+                eprintln!(
+                    "egui: 每帧 —— 控件（qi 侧逻辑 + 控件 FFI）平均 {:.2}ms 最长 {:.2}ms；\
+                     收尾（end_pass + 判定 + 光栅）平均 {:.2}ms 最长 {:.2}ms",
+                    ms(app.t_body) / n,
+                    ms(app.body_max),
+                    ms(app.t_finish) / n,
+                    ms(app.finish_max)
                 );
             }
         }
