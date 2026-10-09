@@ -12,6 +12,8 @@ use std::io::BufReader;
 pub struct AudioPlayer {
     _stream: OutputStream, // Keep stream alive
     sink: Sink,
+    /// 解码器给出的总时长（有的格式给不出，None）
+    duration: Option<std::time::Duration>,
 }
 
 impl AudioPlayer {
@@ -24,6 +26,7 @@ impl AudioPlayer {
         // Load the audio file
         let file = File::open(file_path)?;
         let source = Decoder::new(BufReader::new(file))?;
+        let duration = source.total_duration();
 
         sink.append(source);
         sink.pause(); // Start paused
@@ -31,6 +34,7 @@ impl AudioPlayer {
         Ok(AudioPlayer {
             _stream: stream,
             sink,
+            duration,
         })
     }
 
@@ -63,6 +67,21 @@ impl AudioPlayer {
     pub fn is_finished(&self) -> bool {
         self.sink.empty()
     }
+
+    /// 已播放到的位置
+    pub fn position(&self) -> std::time::Duration {
+        self.sink.get_pos()
+    }
+
+    /// 总时长（格式不支持时 None）
+    pub fn duration(&self) -> Option<std::time::Duration> {
+        self.duration
+    }
+
+    /// 跳到某个位置；播完了（队列空）就跳不了，返回 false
+    pub fn seek(&self, pos: std::time::Duration) -> bool {
+        self.sink.try_seek(pos).is_ok()
+    }
 }
 
 /// Play a sound file once (fire and forget)
@@ -90,6 +109,8 @@ pub fn play_sound_loop(file_path: &str) -> Result<AudioPlayer, Box<dyn std::erro
     Ok(AudioPlayer {
         _stream: stream,
         sink,
+        // 循环播放没有总时长
+        duration: None,
     })
 }
 

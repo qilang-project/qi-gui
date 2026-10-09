@@ -151,3 +151,31 @@ pub extern "C" fn qi_gui_audio_free_impl(audio_id: u64) {
         players.borrow_mut().remove(&audio_id);
     });
 }
+
+fn with_player<R>(audio_id: u64, f: impl FnOnce(&crate::audio::AudioPlayer) -> R) -> Option<R> {
+    AUDIO_PLAYERS.with(|players| players.borrow().get(&audio_id).map(f))
+}
+
+/// 音频位置(id) → 已播放毫秒
+#[no_mangle]
+pub extern "C" fn qi_gui_audio_position_ms_impl(audio_id: u64) -> i64 {
+    with_player(audio_id, |p| p.position().as_millis() as i64).unwrap_or(0)
+}
+
+/// 音频时长(id) → 总毫秒；格式给不出时长时 0
+#[no_mangle]
+pub extern "C" fn qi_gui_audio_duration_ms_impl(audio_id: u64) -> i64 {
+    with_player(audio_id, |p| {
+        p.duration().map(|d| d.as_millis() as i64).unwrap_or(0)
+    })
+    .unwrap_or(0)
+}
+
+/// 音频跳到(id, 毫秒) → 1 成功 / 0 失败（已播完的要重新加载才能跳）
+#[no_mangle]
+pub extern "C" fn qi_gui_audio_seek_ms_impl(audio_id: u64, ms: i64) -> i64 {
+    with_player(audio_id, |p| {
+        p.seek(std::time::Duration::from_millis(ms.max(0) as u64)) as i64
+    })
+    .unwrap_or(0)
+}

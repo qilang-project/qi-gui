@@ -236,16 +236,16 @@ fn read_autoclose() -> Option<Duration> {
 }
 
 /// 当前帧上下文：控件 FFI 从这里取 Ui 栈顶
-struct FrameCtx {
-    ctx: egui::Context,
+pub(crate) struct FrameCtx {
+    pub(crate) ctx: egui::Context,
     ppp: f32,
-    ui_stack: Vec<*mut egui::Ui>,
-    /// begin/end 式容器（滚动区/折叠区）的配对元数据栈
-    containers: Vec<Container>,
+    pub(crate) ui_stack: Vec<*mut egui::Ui>,
+    /// begin/end 式容器（滚动区/折叠区/分栏）的配对元数据栈
+    pub(crate) containers: Vec<Container>,
 }
 
 /// begin/end 容器元数据：end 时据此收尾（滚动条绘制/光标推进/是否需弹 Ui）
-enum Container {
+pub(crate) enum Container {
     /// 滚动区：id 用于在 egui 内存里持久化滚动偏移，viewport 是可视窗口
     Scroll { id: Id, viewport: egui::Rect },
     /// 折叠区：展开时压了子 Ui（收起时没压，end 不弹）
@@ -254,6 +254,23 @@ enum Container {
     /// offset 是画布左上角全局坐标（局部坐标 + offset = 全局），
     /// response 存点击/悬停查询。allocate_painter 已占位并推进父光标，故 end 只弹元数据。
     Canvas(CanvasCtx),
+    /// 分栏（egui_editor.rs）：full 是整个分栏区域，end 时父光标推进过它；
+    /// right 是右栏矩形，on_right 表示已经切到右栏
+    Columns {
+        full: egui::Rect,
+        right: egui::Rect,
+        on_right: bool,
+    },
+    /// 区域（egui_editor.rs）：outer 是整块；fixed=false 时随内容长，
+    /// bg_slot 是先占好的底色形状位（结束时才知道多高）
+    Region {
+        outer: egui::Rect,
+        pad: f32,
+        fixed: bool,
+        bg_slot: Option<(egui::layers::ShapeIdx, Color32)>,
+    },
+    /// 右对齐行（egui_editor.rs）
+    Right,
 }
 
 /// 画布上下文：绘制 FFI 从这里取 painter，查询 FFI 从这里读 response
@@ -266,7 +283,7 @@ pub(crate) struct CanvasCtx {
 thread_local! {
     static APPS: RefCell<HashMap<u64, EguiApp>> = RefCell::new(HashMap::new());
     static NEXT_ID: RefCell<u64> = const { RefCell::new(1) };
-    static FRAME: RefCell<Option<FrameCtx>> = const { RefCell::new(None) };
+    pub(crate) static FRAME: RefCell<Option<FrameCtx>> = const { RefCell::new(None) };
     /// 字符串返回复用缓冲：Qi 侧调用点会立刻 qi_string_from_cstr 拷贝，
     /// 故单槽复用即可，零逐帧泄漏。
     static RET_BUF: RefCell<Option<CString>> = const { RefCell::new(None) };
@@ -322,6 +339,7 @@ fn install_cjk_fonts(ctx: &egui::Context) {
                 .entry(egui::FontFamily::Monospace)
                 .or_default()
                 .push("qi_cjk".to_owned());
+            crate::egui_editor::install_bold_font(&mut fonts);
             ctx.set_fonts(fonts);
             return;
         }
@@ -495,7 +513,11 @@ pub extern "C" fn qi_gui_egui_frame_begin_impl(app_id: u64) -> i32 {
             return 0;
         };
 
-        let raw_input = state.take_egui_input(&window);
+        let mut raw_input = state.take_egui_input(&window);
+        // QI_GUI_SCRIPT 回放：注入了事件就当这一帧有输入，别被静止跳帧吞掉
+        if crate::egui_script::inject(&mut raw_input) {
+            app.handler.input_dirty = true;
+        }
         let ctx = app.handler.egui_ctx.clone();
         ctx.begin_pass(raw_input);
         // 抓这一帧的键盘快照（必须在 begin_pass 之后，那时 InputState 才是本帧的）
@@ -504,7 +526,7 @@ pub extern "C" fn qi_gui_egui_frame_begin_impl(app_id: u64) -> i32 {
 
         // 建根 Ui：占满可用区域，留 10pt 边距，纵向布局
         let mut rect = ctx.available_rect();
-        rect = rect.shrink(10.0);
+        rect = rect.shrink(crate::egui_editor::window_margin());
         let root = egui::Ui::new(
             ctx.clone(),
             LayerId::background(),
@@ -592,15 +614,18 @@ pub extern "C" fn qi_gui_egui_frame_end_impl(app_id: u64) {
             }
         }
         let input_dirty = std::mem::take(&mut app.handler.input_dirty);
+        let shot = crate::egui_script::take_shot();
         let same_pixels = app.last_paint_key == Some(paint_key)
             && app.last_shapes.as_ref() == Some(&output.shapes);
 
-        if should_skip(
-            same_pixels,
-            tex_changed,
-            input_dirty,
-            app.last_paint.elapsed(),
-        ) {
+        if shot.is_none()
+            && should_skip(
+                same_pixels,
+                tex_changed,
+                input_dirty,
+                app.last_paint.elapsed(),
+            )
+        {
             app.skipped += 1;
             app.last_skipped = true;
             // 跳帧时不 request_redraw：那既会招来一个白跑的 RedrawRequested，
@@ -628,6 +653,9 @@ pub extern "C" fn qi_gui_egui_frame_end_impl(app_id: u64) {
                     &jobs,
                     &app.textures,
                 );
+                if let Some(path) = &shot {
+                    crate::egui_script::save_png(path, &buffer, w, h);
+                }
                 let _ = buffer.present();
             }
         }
@@ -957,10 +985,9 @@ pub extern "C" fn qi_gui_egui_scroll_end_impl() {
                 egui::pos2(track.min.x, thumb_y),
                 vec2(track.width(), thumb_h),
             );
-            let weak = parent.visuals().widgets.noninteractive.bg_fill;
-            let strong = parent.visuals().widgets.inactive.fg_stroke.color;
-            parent.painter().rect_filled(track, 3.0, weak);
-            parent.painter().rect_filled(thumb, 3.0, strong);
+            // 只画滑块、不画滑道，用弱文字色再淡一半：滚动条是辅助信息，不该抢正文
+            let thumb_color = parent.visuals().weak_text_color().gamma_multiply(0.5);
+            parent.painter().rect_filled(thumb, 3.0, thumb_color);
         }
         parent.advance_cursor_after_rect(viewport);
     });

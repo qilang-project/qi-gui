@@ -93,6 +93,20 @@ pub extern "C" fn qi_gui_egui_label_tip_impl(text: *const c_char, tip: *const c_
     });
 }
 
+/// 按路径取图片纹理：先查缓存，未命中则解码 + 注册（解码失败返回 None，下次还会再试）
+pub(crate) fn image_texture(p: &str) -> Option<egui::TextureHandle> {
+    if let Some(t) = IMAGES.with(|m| m.borrow().get(p).cloned()) {
+        return Some(t);
+    }
+    let img = image::open(p).ok()?;
+    let rgba = img.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    let ci = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], rgba.as_raw());
+    let handle = with_ctx(|ctx| ctx.load_texture(p, ci, egui::TextureOptions::LINEAR))?;
+    IMAGES.with(|m| m.borrow_mut().insert(p.to_string(), handle.clone()));
+    Some(handle)
+}
+
 /// 只读表格：表头 CSV（逗号分列），数据行以 '\n' 分行、逗号分列。斑马纹。
 #[no_mangle]
 pub extern "C" fn qi_gui_egui_table_impl(
@@ -159,26 +173,7 @@ pub extern "C" fn qi_gui_egui_bar_chart_impl(
 #[no_mangle]
 pub extern "C" fn qi_gui_egui_image_impl(path: *const c_char, width: i64, height: i64) {
     let p = cstr(path);
-    // 先查缓存；未命中则解码 + 注册纹理
-    let tex = IMAGES.with(|m| m.borrow().get(&p).cloned());
-    let tex = match tex {
-        Some(t) => Some(t),
-        None => {
-            let loaded = image::open(&p).ok().map(|img| {
-                let rgba = img.to_rgba8();
-                let (w, h) = rgba.dimensions();
-                egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], rgba.as_raw())
-            });
-            match loaded {
-                Some(ci) => with_ctx(|ctx| ctx.load_texture(&p, ci, egui::TextureOptions::LINEAR))
-                    .map(|handle| {
-                        IMAGES.with(|m| m.borrow_mut().insert(p.clone(), handle.clone()));
-                        handle
-                    }),
-                None => None,
-            }
-        }
-    };
+    let tex = image_texture(&p);
     with_top_ui(|ui| match &tex {
         Some(t) => {
             let orig = t.size_vec2();

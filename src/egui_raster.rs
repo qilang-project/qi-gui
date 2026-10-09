@@ -280,9 +280,11 @@ fn raster_mesh(
                 let dg = ((dst >> 8) & 0xFF) as f32 / 255.0;
                 let db = (dst & 0xFF) as f32 / 255.0;
                 let inv = 1.0 - sa;
-                let or = ((sr + dr * inv).clamp(0.0, 1.0) * 255.0) as u32;
-                let og = ((sg + dg * inv).clamp(0.0, 1.0) * 255.0) as u32;
-                let ob = ((sb + db * inv).clamp(0.0, 1.0) * 255.0) as u32;
+                // 四舍五入而不是截断：截断会让同一种颜色在相邻像素间 ±1 抖动，
+                // 大面积浅色底上能看出一道道细纹，颜色也系统性偏暗
+                let or = ((sr + dr * inv).clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
+                let og = ((sg + dg * inv).clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
+                let ob = ((sb + db * inv).clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
                 buf[dst_i] = (or << 16) | (og << 8) | ob;
             }
         }

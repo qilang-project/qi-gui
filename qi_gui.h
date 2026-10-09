@@ -9,6 +9,21 @@
 #include <stdlib.h>
 
 /**
+ * 片段样式位（与 qi 侧 `图形.富文本片段` 的样式参数一致）
+ */
+#define FLAG_BOLD 1
+
+#define FLAG_ITALIC 2
+
+#define FLAG_MONO 4
+
+#define FLAG_STRIKE 8
+
+#define FLAG_UNDERLINE 16
+
+#define FLAG_CODE_BG 32
+
+/**
  * 库版本（保留供 版本() 使用）
  */
 char *qi_gui_version_impl(void);
@@ -57,6 +72,21 @@ int32_t qi_gui_audio_is_finished_impl(uint64_t audio_id);
  * 释放播放器
  */
 void qi_gui_audio_free_impl(uint64_t audio_id);
+
+/**
+ * 音频位置(id) → 已播放毫秒
+ */
+int64_t qi_gui_audio_position_ms_impl(uint64_t audio_id);
+
+/**
+ * 音频时长(id) → 总毫秒；格式给不出时长时 0
+ */
+int64_t qi_gui_audio_duration_ms_impl(uint64_t audio_id);
+
+/**
+ * 音频跳到(id, 毫秒) → 1 成功 / 0 失败（已播完的要重新加载才能跳）
+ */
+int64_t qi_gui_audio_seek_ms_impl(uint64_t audio_id, int64_t ms);
 
 /**
  * 创建 egui 应用窗口，返回句柄（>0 成功，0 失败）
@@ -260,6 +290,144 @@ int64_t qi_gui_egui_canvas_mouse_x_impl(void);
  * 画布鼠标Y() → 整数：鼠标在画布内的局部 Y（无悬停返回 -1）
  */
 int64_t qi_gui_egui_canvas_mouse_y_impl(void);
+
+/**
+ * 富文本开始()：开始拼一行
+ */
+void qi_gui_egui_rich_begin_impl(void);
+
+/**
+ * 富文本片段(文本, 字号, 样式位, 颜色)：字号 ≤0 = 正文字号；颜色 <0 = 主题文字色
+ */
+void qi_gui_egui_rich_span_impl(const char *text,
+                                int64_t size,
+                                int64_t flags,
+                                int64_t color);
+
+/**
+ * 富文本结束(缩进, 竖线)：整行按可用宽度折行后放下。缩进单位是像素；
+ * 竖线=1 时在缩进区画一条引用竖线（Markdown 的 > 引用）。
+ */
+void qi_gui_egui_rich_end_impl(int64_t indent, int64_t bar);
+
+/**
+ * 代码块(文本, 字号)：等宽 + 底色框，占满可用宽度；字号 <=0 用等宽默认字号
+ */
+void qi_gui_egui_code_block_impl(const char *text,
+                                 int64_t size);
+
+/**
+ * 分栏开始(左栏千分比)：把剩余区域左右分成两栏（100–900‰），先进左栏
+ */
+void qi_gui_egui_columns_begin_impl(int64_t left_permille);
+
+/**
+ * 分栏下一栏()：从左栏切到右栏
+ */
+void qi_gui_egui_columns_next_impl(void);
+
+/**
+ * 分栏结束()：收起当前栏，父光标推进过整个分栏区域
+ */
+void qi_gui_egui_columns_end_impl(void);
+
+/**
+ * 编辑区(id, 当前值, 等宽, 字号) → 新值：撑满剩余区域的多行输入，自带纵向滚动。
+ * Tab 键插入制表符而不是切焦点。调用后可用 编辑区光标() 取光标位置。
+ */
+const char *qi_gui_egui_editor_impl(const char *id,
+                                    const char *value,
+                                    int64_t mono,
+                                    int64_t size);
+
+/**
+ * 编辑区光标() → 最近一次 编辑区 调用后的光标字符下标；没有光标时 -1
+ */
+int64_t qi_gui_egui_editor_cursor_impl(void);
+
+/**
+ * 设置编辑区光标(id, 字符下标)：下一帧生效（协同编辑合入远端改动后挪光标用）
+ */
+void qi_gui_egui_editor_set_cursor_impl(const char *id,
+                                        int64_t pos);
+
+/**
+ * 组合键(键名, 上档) → 1/0：Cmd（macOS）/ Ctrl（其它）+ 键本帧刚按下。
+ * 上档=1 要求同时按 Shift，上档=0 要求没按 Shift（⌘S 与 ⇧⌘S 互不串）。
+ * 命中即消费该按键事件，不会再落进输入框。
+ */
+int64_t qi_gui_egui_shortcut_impl(const char *name, int64_t shift);
+
+/**
+ * 设置窗口边距(像素)：根区域离窗口边缘多远（默认 10；做贴边的工具栏/状态栏设 0）
+ */
+void qi_gui_egui_window_margin_impl(int64_t px);
+
+/**
+ * 设置外观(底色, 文字, 弱文字, 强调, 边框, 字号)：一次给全套浅/深色配色和基准字号。
+ * 颜色是打包整数 r*65536+g*256+b。代码底色、斑马纹、悬停底色都从底色和文字按比例混出来；
+ * 按钮平时没有底，悬停才显出来（工具栏那种扁平按钮）。每帧调用也无妨。
+ */
+void qi_gui_egui_set_appearance_impl(int64_t bg,
+                                     int64_t text,
+                                     int64_t weak,
+                                     int64_t accent,
+                                     int64_t border,
+                                     int64_t size);
+
+/**
+ * 弱标签(文本)：次要信息（状态栏、提示）用的浅色文字
+ */
+void qi_gui_egui_weak_label_impl(const char *text);
+
+/**
+ * 空白(像素)：沿当前布局方向留一段空
+ */
+void qi_gui_egui_add_space_impl(int64_t px);
+
+/**
+ * 区域开始(高度, 内边距, 背景色, 最大宽)：
+ * - 高度 >0 定高；0 随内容长；-1 撑满剩余高度；-(N+1) 撑满但底下让出 N 像素
+ *   （给状态栏留地方）。在滚动区里剩余高度无限，撑满也按随内容长处理
+ * - 背景色 <0 不画底
+ * - 最大宽 >0 且可用宽度更宽时，内容区按最大宽水平居中（阅读栏）
+ */
+void qi_gui_egui_region_begin_impl(int64_t height,
+                                   int64_t pad,
+                                   int64_t bg,
+                                   int64_t max_width);
+
+/**
+ * 区域结束()：补画底色，父光标推进过整个区域
+ */
+void qi_gui_egui_region_end_impl(void);
+
+/**
+ * 右对齐开始()：在当前这一行剩下的宽度里从右往左排（先写的在最右）
+ */
+void qi_gui_egui_right_begin_impl(void);
+
+/**
+ * 右对齐结束()
+ */
+void qi_gui_egui_right_end_impl(void);
+
+/**
+ * 适应图片(路径, 最大宽) → 1 显示了 / 0 读不了：按原图比例缩到可用宽度
+ * （再不超过最大宽，<=0 不限），不放大；圆角
+ */
+int64_t qi_gui_egui_image_fit_impl(const char *path, int64_t max_width);
+
+/**
+ * 进度拖条(id, 千分比, 宽) → 本帧被点/拖到的千分比，没动返回 -1。
+ * 细轨 + 强调色已走部分 + 圆头，音视频播放进度用。宽 <=0 占满可用宽度
+ */
+int64_t qi_gui_egui_seek_bar_impl(const char *_id, int64_t permille, int64_t width);
+
+/**
+ * 拖入文件() → 这一帧拖进窗口的文件路径，多个用换行分开；没有则空串
+ */
+const char *qi_gui_egui_dropped_files_impl(void);
 
 /**
  * 按键按住(键名) → 1/0：这一帧该键是否处于按下状态（持续触发，适合移动）
