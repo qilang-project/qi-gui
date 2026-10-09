@@ -118,7 +118,10 @@ pub fn play_sound_loop(file_path: &str) -> Result<AudioPlayer, Box<dyn std::erro
 mod tests {
     use super::*;
 
+    // 要一台真的音频输出设备：CI runner（Linux 无声卡、Windows 无音频端点）上
+    // 必挂。本机跑 cargo test -- --ignored 照样能测。
     #[test]
+    #[ignore = "需要真实音频输出设备，CI runner 没有"]
     fn test_audio_player_creation() {
         // Test that we can create an audio player structure
         // (cannot test actual playback without audio files)

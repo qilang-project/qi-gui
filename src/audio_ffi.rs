@@ -24,8 +24,11 @@ pub extern "C" fn qi_gui_version_impl() -> *mut c_char {
 }
 
 /// 释放由本库返回的字符串
+///
+/// # Safety
+/// `s` 必须是空指针，或是本库（`CString::into_raw`）返回、尚未释放过的指针。
 #[no_mangle]
-pub extern "C" fn qi_gui_free_string_impl(s: *mut c_char) {
+pub unsafe extern "C" fn qi_gui_free_string_impl(s: *mut c_char) {
     if s.is_null() {
         return;
     }
@@ -35,8 +38,11 @@ pub extern "C" fn qi_gui_free_string_impl(s: *mut c_char) {
 }
 
 /// 加载音频文件，返回播放器 id（>0 成功，0 失败）。支持 MP3/WAV/FLAC/Vorbis。
+///
+/// # Safety
+/// `file_path` 必须是空指针，或指向以 NUL 结尾、在调用期间有效的 C 字符串。
 #[no_mangle]
-pub extern "C" fn qi_gui_audio_load_impl(file_path: *const c_char) -> u64 {
+pub unsafe extern "C" fn qi_gui_audio_load_impl(file_path: *const c_char) -> u64 {
     if file_path.is_null() {
         return 0;
     }
